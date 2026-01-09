@@ -83,6 +83,7 @@ type responseMsg struct {
 	content          string
 	promptTokens     int64
 	completionTokens int64
+	history          []openai.ChatCompletionMessageParamUnion
 }
 
 type model struct {
@@ -197,6 +198,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.inputTokens += msg.promptTokens
 		m.outputTokens += msg.completionTokens
+		m.history = msg.history
 		content := msg.content
 		if m.renderer != nil {
 			rendered, _ := m.renderer.Render(msg.content)
@@ -337,6 +339,7 @@ func (m model) sendMessage(input string) tea.Cmd {
 			content:          content,
 			promptTokens:     resp.Usage.PromptTokens,
 			completionTokens: resp.Usage.CompletionTokens,
+			history:          m.history,
 		}
 	}
 }
