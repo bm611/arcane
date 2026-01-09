@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	chatModel   = "minimax/minimax-m2.1"
-	searchModel = "perplexity/sonar-pro"
+	chatModel    = "minimax/minimax-m2.1"
+	searchModel  = "perplexity/sonar-pro"
 	maxChatWidth = 100
 )
 
@@ -128,18 +128,13 @@ func initialModel() model {
 
 	vp := viewport.New(60, 15)
 
-	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(80),
-	)
-
 	return model{
 		textInput: ti,
 		viewport:  vp,
 		spinner:   sp,
 		client:    client,
 		history:   []openai.ChatCompletionMessageParamUnion{},
-		renderer:  renderer,
+		renderer:  nil, // defer initialization until WindowSizeMsg
 		messages:  []string{},
 	}
 }
@@ -202,8 +197,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.inputTokens += msg.promptTokens
 		m.outputTokens += msg.completionTokens
-		rendered, _ := m.renderer.Render(msg.content)
-		m.messages = append(m.messages, formatAIMessage(strings.TrimSpace(rendered)))
+		content := msg.content
+		if m.renderer != nil {
+			rendered, _ := m.renderer.Render(msg.content)
+			content = strings.TrimSpace(rendered)
+		}
+		m.messages = append(m.messages, formatAIMessage(content))
 		m.updateViewport()
 		return m, nil
 
