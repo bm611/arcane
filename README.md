@@ -7,7 +7,8 @@ A minimal AI chat TUI built with Go using the [Bubble Tea](https://github.com/ch
 ## Features
 
 - Clean, responsive terminal interface with Markdown rendering
-- Dual-mode AI: Chat mode (`minimax/minimax-m2.1`) and Search mode (`perplexity/sonar-pro`)
+- Multi-model AI support with 7 different models to choose from
+- Model selector modal with provider color coding
 - Conversation history with token usage tracking
 - Scrollable chat viewport with styled messages
 
@@ -39,9 +40,10 @@ Run the application:
 | Key | Action |
 |-----|--------|
 | `Enter` | Send message |
-| `Ctrl+S` | Toggle between Chat and Search mode |
+| `Ctrl+B` | Toggle model selector modal |
+| `↑` / `↓` | Navigate model selector (when open) |
 | `Ctrl+N` | Start new chat session |
-| `Ctrl+C` / `Esc` | Quit |
+| `Ctrl+C` / `Esc` | Quit (or close modal) |
 
 You can also type `/clear` or `/reset` to start a new session.
 
