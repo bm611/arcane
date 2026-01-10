@@ -8,9 +8,12 @@ A minimal AI chat TUI built with Go using the [Bubble Tea](https://github.com/ch
 
 - Clean, responsive terminal interface with Markdown rendering
 - Multi-model AI support with 7 different models to choose from
-- Model selector modal with provider color coding
+- Interactive model selector modal with provider color coding
+- Theme-aware background colors for light/dark terminals
 - Conversation history with token usage tracking
 - Scrollable chat viewport with styled messages
+- Optimized startup time
+- Proper message history management across chat sessions
 
 ## Installation
 
