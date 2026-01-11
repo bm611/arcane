@@ -13,7 +13,8 @@ A minimal AI chat TUI built with Go using the [Bubble Tea](https://github.com/ch
 - Conversation history with token usage tracking
 - Scrollable chat viewport with styled messages
 - Optimized startup time
-- Proper message history management across chat sessions
+- Persistent chat history stored locally (SQLite)
+- Interactive chat history viewer to resume past conversations
 
 ## Installation
 
@@ -44,7 +45,8 @@ Run the application:
 |-----|--------|
 | `Enter` | Send message |
 | `Ctrl+B` | Toggle model selector modal |
-| `↑` / `↓` | Navigate model selector (when open) |
+| `Ctrl+H` | Toggle chat history |
+| `↑` / `↓` | Navigate model/history selector (when open) |
 | `Ctrl+N` | Start new chat session |
 | `Ctrl+C` / `Esc` | Quit (or close modal) |
 
