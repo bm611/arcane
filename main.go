@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -14,12 +17,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	_ "modernc.org/sqlite"
 )
 
 const (
 	maxChatWidth = 100
 	modalWidth   = 60
 	contentWidth = 54
+
+	historyListLimit = 50
+
+	roleUser      = "user"
+	roleAssistant = "assistant"
 )
 
 type AIModel struct {
@@ -27,6 +36,18 @@ type AIModel struct {
 	Name        string
 	Provider    string
 	Description string
+}
+
+type chatListItem struct {
+	ID             int64
+	UpdatedAtUnix  int64
+	LastUserPrompt string
+	ModelID        string
+}
+
+type dbMessage struct {
+	Role    string
+	Content string
 }
 
 var availableModels = []AIModel{
@@ -123,10 +144,10 @@ var (
 			Width(contentWidth)
 
 	modalSelectedStyle = lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(lipgloss.Color("#2D2D44")).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Width(contentWidth)
+				Padding(0, 1).
+				Background(lipgloss.Color("#2D2D44")).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Width(contentWidth)
 
 	modelNameStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -161,6 +182,9 @@ type model struct {
 	textInput          textinput.Model
 	spinner            spinner.Model
 	client             openai.Client
+	db                 *sql.DB
+	dbErr              error
+	currentChatID      int64
 	history            []openai.ChatCompletionMessageParamUnion
 	renderer           *glamour.TermRenderer
 	err                error
@@ -169,6 +193,11 @@ type model struct {
 	outputTokens       int64
 	windowWidth        int
 	windowHeight       int
+	historyOpen        bool
+	historySelectedIdx int
+	historyChatCount   int
+	historyChats       []chatListItem
+	historyErr         error
 	modelSelectorOpen  bool
 	currentModel       AIModel
 	selectedModelIndex int
@@ -200,14 +229,24 @@ func initialModel() model {
 
 	vp := viewport.New(60, 15)
 
+	db, dbErr := openArcaneDB()
+
 	return model{
 		textInput:          ti,
 		viewport:           vp,
 		spinner:            sp,
 		client:             client,
+		db:                 db,
+		dbErr:              dbErr,
+		currentChatID:      0,
 		history:            []openai.ChatCompletionMessageParamUnion{},
 		renderer:           nil,
 		messages:           []string{},
+		historyOpen:        false,
+		historySelectedIdx: 0,
+		historyChatCount:   0,
+		historyChats:       nil,
+		historyErr:         nil,
 		modelSelectorOpen:  false,
 		currentModel:       availableModels[5], // minimax/minimax-m2.1 as default
 		selectedModelIndex: 5,
@@ -234,6 +273,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spCmd
 
 	case tea.KeyMsg:
+		if m.historyOpen {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc", "ctrl+h":
+				m.historyOpen = false
+				m.historyErr = nil
+				return m, nil
+			case "up", "k":
+				if len(m.historyChats) == 0 {
+					return m, nil
+				}
+				m.historySelectedIdx--
+				if m.historySelectedIdx < 0 {
+					m.historySelectedIdx = len(m.historyChats) - 1
+				}
+				return m, nil
+			case "down", "j":
+				if len(m.historyChats) == 0 {
+					return m, nil
+				}
+				m.historySelectedIdx++
+				if m.historySelectedIdx >= len(m.historyChats) {
+					m.historySelectedIdx = 0
+				}
+				return m, nil
+			case "enter":
+				if len(m.historyChats) == 0 {
+					return m, nil
+				}
+				chat := m.historyChats[m.historySelectedIdx]
+				if err := m.loadChatFromDB(chat.ID, chat.ModelID); err != nil {
+					m.historyErr = err
+					return m, nil
+				}
+				m.historyOpen = false
+				m.historyErr = nil
+				return m, nil
+			}
+			return m, nil
+		}
+
 		if m.modelSelectorOpen {
 			switch msg.String() {
 			case "ctrl+c":
@@ -274,6 +355,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyCtrlB:
 			m.modelSelectorOpen = true
+			m.historyOpen = false
+			return m, nil
+
+		case tea.KeyCtrlH:
+			m.modelSelectorOpen = false
+			m.historyOpen = true
+			m.refreshHistoryFromDB()
 			return m, nil
 
 		case tea.KeyEnter:
@@ -291,6 +379,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			m.messages = append(m.messages, formatUserMessage(input, m.viewport.Width, len(m.messages) == 0))
+			if err := m.persistUserMessage(input); err != nil {
+				m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("History error: %v", err)))
+			}
 			m.textInput.Reset()
 			m.loading = true
 			m.updateViewport()
@@ -303,12 +394,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputTokens += msg.promptTokens
 		m.outputTokens += msg.completionTokens
 		m.history = msg.history
-		content := msg.content
+		displayContent := msg.content
 		if m.renderer != nil {
 			rendered, _ := m.renderer.Render(msg.content)
-			content = strings.TrimSpace(rendered)
+			displayContent = strings.TrimSpace(rendered)
 		}
-		m.messages = append(m.messages, formatAIMessage(content))
+		m.messages = append(m.messages, formatAIMessage(displayContent))
+		if err := m.persistAssistantMessage(msg.content); err != nil {
+			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("History error: %v", err)))
+		}
 		m.updateViewport()
 		return m, nil
 
@@ -414,11 +508,359 @@ func (m *model) updateViewport() {
 func (m *model) resetSession() {
 	m.messages = []string{}
 	m.history = []openai.ChatCompletionMessageParamUnion{}
+	m.currentChatID = 0
 	m.inputTokens = 0
 	m.outputTokens = 0
+	m.historyOpen = false
+	m.historyErr = nil
 	m.viewport.SetContent(getWelcomeScreen(m.viewport.Width, m.viewport.Height))
 	m.viewport.GotoTop()
 	m.textInput.Reset()
+}
+
+func openArcaneDB() (*sql.DB, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		homeDir, herr := os.UserHomeDir()
+		if herr != nil {
+			return nil, err
+		}
+		configDir = filepath.Join(homeDir, ".config")
+	}
+
+	dbDir := filepath.Join(configDir, "arcane")
+	if err := os.MkdirAll(dbDir, 0o700); err != nil {
+		return nil, err
+	}
+
+	dbPath := filepath.Join(dbDir, "arcane.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	schema := []string{
+		`CREATE TABLE IF NOT EXISTS chats (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			model_id TEXT NOT NULL,
+			last_user_prompt TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			chat_id INTEGER NOT NULL,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_chats_updated_at ON chats(updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id);`,
+	}
+
+	for _, stmt := range schema {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+
+	return db, nil
+}
+
+func promptPreview(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	const maxRunes = 500
+	r := []rune(s)
+	if len(r) > maxRunes {
+		return string(r[:maxRunes])
+	}
+	return s
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 1 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
+}
+
+func relativeTime(t time.Time) string {
+	d := time.Since(t)
+	if d < 0 {
+		d = -d
+	}
+	if d < time.Minute {
+		return "just now"
+	}
+	if d < time.Hour {
+		mins := int(d.Minutes())
+		if mins == 1 {
+			return "1 min ago"
+		}
+		return fmt.Sprintf("%d mins ago", mins)
+	}
+	if d < 24*time.Hour {
+		hrs := int(d.Hours())
+		if hrs == 1 {
+			return "1 hr ago"
+		}
+		return fmt.Sprintf("%d hrs ago", hrs)
+	}
+	days := int(d.Hours() / 24)
+	if days < 14 {
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	}
+	weeks := days / 7
+	if weeks == 1 {
+		return "1 week ago"
+	}
+	return fmt.Sprintf("%d weeks ago", weeks)
+}
+
+func createChat(db *sql.DB, nowUnix int64, modelID string) (int64, error) {
+	res, err := db.Exec(
+		"INSERT INTO chats(created_at, updated_at, model_id, last_user_prompt) VALUES(?, ?, ?, '')",
+		nowUnix,
+		nowUnix,
+		modelID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func insertDBMessage(db *sql.DB, chatID int64, role, content string, nowUnix int64) error {
+	_, err := db.Exec(
+		"INSERT INTO messages(chat_id, role, content, created_at) VALUES(?, ?, ?, ?)",
+		chatID,
+		role,
+		content,
+		nowUnix,
+	)
+	return err
+}
+
+func updateChatOnUser(db *sql.DB, chatID int64, nowUnix int64, modelID, lastUserPrompt string) error {
+	_, err := db.Exec(
+		"UPDATE chats SET updated_at = ?, model_id = ?, last_user_prompt = ? WHERE id = ?",
+		nowUnix,
+		modelID,
+		lastUserPrompt,
+		chatID,
+	)
+	return err
+}
+
+func touchChat(db *sql.DB, chatID int64, nowUnix int64) error {
+	_, err := db.Exec(
+		"UPDATE chats SET updated_at = ? WHERE id = ?",
+		nowUnix,
+		chatID,
+	)
+	return err
+}
+
+func getRecentChats(db *sql.DB, limit int) (int, []chatListItem, error) {
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&count); err != nil {
+		return 0, nil, err
+	}
+
+	rows, err := db.Query(
+		"SELECT id, updated_at, last_user_prompt, model_id FROM chats ORDER BY updated_at DESC LIMIT ?",
+		limit,
+	)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer rows.Close()
+
+	items := make([]chatListItem, 0, limit)
+	for rows.Next() {
+		var it chatListItem
+		if err := rows.Scan(&it.ID, &it.UpdatedAtUnix, &it.LastUserPrompt, &it.ModelID); err != nil {
+			return 0, nil, err
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, err
+	}
+
+	return count, items, nil
+}
+
+func getChatMessages(db *sql.DB, chatID int64) ([]dbMessage, error) {
+	rows, err := db.Query(
+		"SELECT role, content FROM messages WHERE chat_id = ? ORDER BY id ASC",
+		chatID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	msgs := []dbMessage{}
+	for rows.Next() {
+		var m dbMessage
+		if err := rows.Scan(&m.Role, &m.Content); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+func findModelByID(id string) (AIModel, int, bool) {
+	for i, mdl := range availableModels {
+		if mdl.ID == id {
+			return mdl, i, true
+		}
+	}
+	return AIModel{}, 0, false
+}
+
+func (m *model) refreshHistoryFromDB() {
+	m.historyErr = nil
+	m.historyChats = nil
+	m.historyChatCount = 0
+	m.historySelectedIdx = 0
+
+	if m.dbErr != nil {
+		m.historyErr = m.dbErr
+		return
+	}
+	if m.db == nil {
+		m.historyErr = fmt.Errorf("history database not initialized")
+		return
+	}
+
+	count, chats, err := getRecentChats(m.db, historyListLimit)
+	if err != nil {
+		m.historyErr = err
+		return
+	}
+	m.historyChatCount = count
+	m.historyChats = chats
+}
+
+func (m *model) persistUserMessage(content string) error {
+	if m.dbErr != nil {
+		return m.dbErr
+	}
+	if m.db == nil {
+		return fmt.Errorf("history database not initialized")
+	}
+
+	nowUnix := time.Now().Unix()
+	if m.currentChatID == 0 {
+		id, err := createChat(m.db, nowUnix, m.currentModel.ID)
+		if err != nil {
+			return err
+		}
+		m.currentChatID = id
+	}
+
+	if err := insertDBMessage(m.db, m.currentChatID, roleUser, content, nowUnix); err != nil {
+		return err
+	}
+	return updateChatOnUser(m.db, m.currentChatID, nowUnix, m.currentModel.ID, promptPreview(content))
+}
+
+func (m *model) persistAssistantMessage(content string) error {
+	if m.currentChatID == 0 {
+		return nil
+	}
+	if m.dbErr != nil {
+		return m.dbErr
+	}
+	if m.db == nil {
+		return fmt.Errorf("history database not initialized")
+	}
+
+	nowUnix := time.Now().Unix()
+	if err := insertDBMessage(m.db, m.currentChatID, roleAssistant, content, nowUnix); err != nil {
+		return err
+	}
+	return touchChat(m.db, m.currentChatID, nowUnix)
+}
+
+func (m *model) loadChatFromDB(chatID int64, modelID string) error {
+	if m.dbErr != nil {
+		return m.dbErr
+	}
+	if m.db == nil {
+		return fmt.Errorf("history database not initialized")
+	}
+
+	msgs, err := getChatMessages(m.db, chatID)
+	if err != nil {
+		return err
+	}
+
+	if modelID != "" {
+		if mdl, idx, ok := findModelByID(modelID); ok {
+			m.currentModel = mdl
+			m.selectedModelIndex = idx
+		} else {
+			m.currentModel = AIModel{ID: modelID, Name: modelID, Provider: "Unknown"}
+			m.selectedModelIndex = 0
+		}
+	}
+
+	m.currentChatID = chatID
+	m.loading = false
+	m.inputTokens = 0
+	m.outputTokens = 0
+	m.messages = []string{}
+	m.history = []openai.ChatCompletionMessageParamUnion{}
+
+	for _, msg := range msgs {
+		switch msg.Role {
+		case roleUser:
+			m.messages = append(m.messages, formatUserMessage(msg.Content, m.viewport.Width, len(m.messages) == 0))
+			m.history = append(m.history, openai.UserMessage(msg.Content))
+		case roleAssistant:
+			displayContent := msg.Content
+			if m.renderer != nil {
+				rendered, _ := m.renderer.Render(msg.Content)
+				displayContent = strings.TrimSpace(rendered)
+			}
+			m.messages = append(m.messages, formatAIMessage(displayContent))
+			m.history = append(m.history, openai.AssistantMessage(msg.Content))
+		}
+	}
+
+	m.updateViewport()
+	return nil
 }
 
 func (m model) sendMessage(input string) tea.Cmd {
@@ -520,6 +962,51 @@ func (m model) renderModelSelector() string {
 	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
 }
 
+func (m model) renderHistorySelector() string {
+	title := modalTitleStyle.Render(fmt.Sprintf("Recent Chats (%d)", m.historyChatCount))
+
+	var body string
+	if m.historyErr != nil {
+		errLine := lipgloss.NewStyle().Width(contentWidth).Render(errorStyle.Render(fmt.Sprintf("Error: %v", m.historyErr)))
+		body = errLine
+	} else if len(m.historyChats) == 0 {
+		body = modalItemStyle.Render(lipgloss.NewStyle().Foreground(hintColor).Render("No chats yet"))
+	} else {
+		items := make([]string, 0, len(m.historyChats))
+		for i, chat := range m.historyChats {
+			isSelected := i == m.historySelectedIdx
+			cursor := "  "
+			if isSelected {
+				cursor = "> "
+			}
+			prompt := promptPreview(chat.LastUserPrompt)
+			if prompt == "" {
+				prompt = "(no prompt)"
+			}
+			prompt = truncateRunes(prompt, contentWidth-len(cursor))
+			timeStr := relativeTime(time.Unix(chat.UpdatedAtUnix, 0))
+			row1 := fmt.Sprintf("%s%s", cursor, prompt)
+			row2 := fmt.Sprintf("  %s", timeStr)
+			itemContent := fmt.Sprintf("%s\n%s", row1, row2)
+			if isSelected {
+				items = append(items, modalSelectedStyle.Render(itemContent))
+			} else {
+				items = append(items, modalItemStyle.Render(itemContent))
+			}
+		}
+		body = lipgloss.JoinVertical(lipgloss.Left, items...)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	hint := lipgloss.NewStyle().
+		Foreground(hintColor).
+		Width(contentWidth).
+		PaddingTop(1).
+		Render("↑/↓: navigate • Enter: open • Esc: close")
+
+	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
+}
+
 func (m model) View() string {
 	inputBox := inputBoxStyle.Width(m.viewport.Width - 2).Render(m.textInput.View())
 
@@ -542,8 +1029,23 @@ func (m model) View() string {
 		titleStyle.Render("ARCANE AI"),
 		m.viewport.View(),
 		inputBox,
-		infoStyle(fmt.Sprintf("\n(%s • ctrl+b: models • ctrl+n: new chat • ctrl+c: quit%s)", modelDisplay, tokenInfo)),
+		infoStyle(fmt.Sprintf("\n(%s • ctrl+b: models • ctrl+h: history • ctrl+n: new chat • ctrl+c: quit%s)", modelDisplay, tokenInfo)),
 	)
+
+	if m.historyOpen {
+		modal := m.renderHistorySelector()
+		modal = modalStyle.Width(modalWidth).Render(modal)
+
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("rgba(0,0,0,0.7)")).
+			Render(lipgloss.Place(
+				m.windowWidth,
+				m.windowHeight,
+				lipgloss.Center,
+				lipgloss.Center,
+				modal,
+			))
+	}
 
 	if m.modelSelectorOpen {
 		modal := m.renderModelSelector()
@@ -565,8 +1067,14 @@ func (m model) View() string {
 
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		fmt.Printf("Error: %v", err)
 		os.Exit(1)
+	}
+	if m, ok := finalModel.(model); ok {
+		if m.db != nil {
+			_ = m.db.Close()
+		}
 	}
 }
