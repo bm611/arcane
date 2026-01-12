@@ -980,15 +980,17 @@ func (m model) renderHistorySelector() string {
 			if isSelected {
 				cursor = "> "
 			}
+			timeStr := relativeTime(time.Unix(chat.UpdatedAtUnix, 0))
 			prompt := promptPreview(chat.LastUserPrompt)
 			if prompt == "" {
 				prompt = "(no prompt)"
 			}
-			prompt = truncateRunes(prompt, contentWidth-len(cursor))
-			timeStr := relativeTime(time.Unix(chat.UpdatedAtUnix, 0))
-			row1 := fmt.Sprintf("%s%s", cursor, prompt)
-			row2 := fmt.Sprintf("  %s", timeStr)
-			itemContent := fmt.Sprintf("%s\n%s", row1, row2)
+			// One line: cursor + prompt + space + timeStr
+			// contentWidth - 2 (padding) - len(cursor) - 1 (space) - len(timeStr)
+			availableWidth := contentWidth - 2 - len(cursor) - 1 - len(timeStr)
+			prompt = truncateRunes(prompt, availableWidth)
+
+			itemContent := fmt.Sprintf("%s%s %s", cursor, prompt, lipgloss.NewStyle().Foreground(hintColor).Render(timeStr))
 			if isSelected {
 				items = append(items, modalSelectedStyle.Render(itemContent))
 			} else {
