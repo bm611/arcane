@@ -6,6 +6,8 @@ A minimal AI chat TUI built with Go using the [Bubble Tea](https://github.com/ch
 
 ## Features
 
+- **Agent Mode**: Full access to your file system, shell commands, and codebase.
+- **Chat Mode**: Minimal AI chat TUI built with Bubble Tea for quick queries.
 - Clean, responsive terminal interface with Markdown rendering
 - Multi-model AI support with 7 different models to choose from
 - Interactive model selector modal with provider color coding
@@ -38,6 +40,11 @@ Run the application:
 ```bash
 ./arcane
 ```
+
+## Modes
+
+- **Chat Mode** (Default): Run `./arcane` for a standard AI chat interface.
+- **Agent Mode**: Run `./arcane --agent` to give the AI access to read/edit files and execute bash commands in your current directory.
 
 ## Keyboard Shortcuts
 

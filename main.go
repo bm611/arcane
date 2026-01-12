@@ -3,9 +3,14 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,7 +34,44 @@ const (
 
 	roleUser      = "user"
 	roleAssistant = "assistant"
+	roleTool      = "tool"
+
+	// Context window management
+	maxContextTokens    = 100000 // Target max tokens before compaction
+	recentMessagesKeep  = 10     // Number of recent messages to keep intact
+	charsPerToken       = 4      // Rough estimate for token calculation
+	truncatedResultSize = 200    // Max chars for truncated tool results
 )
+
+// AppMode represents the current operating mode of the application
+type AppMode int
+
+const (
+	ModeChat  AppMode = iota // Regular conversation mode without tools
+	ModeAgent                // Agent mode with full tool access
+)
+
+const chatSystemPrompt = `You are Arcane, a helpful AI assistant. You engage in natural conversation, answer questions, explain concepts, and help with general tasks. You provide clear, concise, and accurate responses. You do not have access to file system tools in this mode - if the user needs file operations, suggest they switch to Agent mode with Ctrl+A.`
+
+const agentSystemPrompt = `You are Arcane, an AI coding assistant with full access to the file system. You can read, write, and edit files, search codebases, and run shell commands to help users with software development tasks.
+
+Available tools:
+- ls: List directory contents (defaults to current directory)
+- read: Read file contents with line numbers
+- write: Create or overwrite files
+- edit: Find and replace text in files (old string must be unique)
+- glob: Find files by pattern, sorted by modification time
+- grep: Search files for regex patterns
+- bash: Run shell commands (30s timeout)
+
+Guidelines:
+- Always read files before editing to understand context
+- Make minimal, targeted changes
+- Use ls and glob to explore the codebase structure first
+- Verify your changes when possible by reading the file after editing
+- Be concise in explanations, focus on the task
+
+Current working directory: %s`
 
 type AIModel struct {
 	ID          string
@@ -72,6 +114,454 @@ type responseMsg struct {
 	promptTokens     int64
 	completionTokens int64
 	history          []openai.ChatCompletionMessageParamUnion
+	contextTokens    int
+}
+
+type toolCallMsg struct {
+	name      string
+	arguments string
+}
+
+type toolResultMsg struct {
+	name   string
+	result string
+}
+
+var toolDefinitions = []openai.ChatCompletionToolUnionParam{
+	openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "read",
+		Description: openai.String("Read file with line numbers (file path, not directory)"),
+		Parameters: openai.FunctionParameters{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":   map[string]interface{}{"type": "string"},
+				"offset": map[string]interface{}{"type": "integer"},
+				"limit":  map[string]interface{}{"type": "integer"},
+			},
+			"required": []string{"path"},
+		},
+	}),
+	openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "write",
+		Description: openai.String("Write content to file"),
+		Parameters: openai.FunctionParameters{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":    map[string]interface{}{"type": "string"},
+				"content": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"path", "content"},
+		},
+	}),
+	openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "edit",
+		Description: openai.String("Replace old with new in file (old must be unique unless all=true)"),
+		Parameters: openai.FunctionParameters{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string"},
+				"old":  map[string]interface{}{"type": "string"},
+				"new":  map[string]interface{}{"type": "string"},
+				"all":  map[string]interface{}{"type": "boolean"},
+			},
+			"required": []string{"path", "old", "new"},
+		},
+	}),
+	openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "glob",
+		Description: openai.String("Find files by pattern, sorted by mtime"),
+		Parameters: openai.FunctionParameters{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pat":  map[string]interface{}{"type": "string"},
+				"path": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"pat"},
+		},
+	}),
+	openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "grep",
+		Description: openai.String("Search files for regex pattern"),
+		Parameters: openai.FunctionParameters{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pat":  map[string]interface{}{"type": "string"},
+				"path": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"pat"},
+		},
+	}),
+	openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "bash",
+		Description: openai.String("Run shell command"),
+		Parameters: openai.FunctionParameters{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"cmd": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"cmd"},
+		},
+	}),
+	openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+		Name:        "ls",
+		Description: openai.String("List files and directories in a path (defaults to current directory)"),
+		Parameters: openai.FunctionParameters{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{},
+		},
+	}),
+}
+
+func toolRead(args map[string]interface{}) (string, error) {
+	path, _ := args["path"].(string)
+	offset, _ := args["offset"].(float64)
+	limit, _ := args["limit"].(float64)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	start := int(offset)
+	if start < 0 {
+		start = 0
+	}
+	if start > len(lines) {
+		start = len(lines)
+	}
+
+	end := len(lines)
+	if limit > 0 {
+		end = start + int(limit)
+		if end > len(lines) {
+			end = len(lines)
+		}
+	}
+
+	selected := lines[start:end]
+	var sb strings.Builder
+	for i, line := range selected {
+		sb.WriteString(fmt.Sprintf("%4d| %s\n", start+i+1, line))
+	}
+	return sb.String(), nil
+}
+
+func toolWrite(args map[string]interface{}) (string, error) {
+	path, _ := args["path"].(string)
+	content, _ := args["content"].(string)
+
+	err := os.WriteFile(path, []byte(content), 0644)
+	if err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func toolEdit(args map[string]interface{}) (string, error) {
+	path, _ := args["path"].(string)
+	oldStr, _ := args["old"].(string)
+	newStr, _ := args["new"].(string)
+	all, _ := args["all"].(bool)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	text := string(data)
+	if !strings.Contains(text, oldStr) {
+		return "error: old_string not found", nil
+	}
+
+	count := strings.Count(text, oldStr)
+	if !all && count > 1 {
+		return fmt.Sprintf("error: old_string appears %d times, must be unique (use all=true)", count), nil
+	}
+
+	var replacement string
+	if all {
+		replacement = strings.ReplaceAll(text, oldStr, newStr)
+	} else {
+		replacement = strings.Replace(text, oldStr, newStr, 1)
+	}
+
+	err = os.WriteFile(path, []byte(replacement), 0644)
+	if err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func toolGlob(args map[string]interface{}) (string, error) {
+	pat, _ := args["pat"].(string)
+	root, _ := args["path"].(string)
+	if root == "" {
+		root = "."
+	}
+
+	pattern := filepath.Join(root, pat)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return "", err
+	}
+
+	type fileInfo struct {
+		path  string
+		mtime time.Time
+	}
+
+	var infos []fileInfo
+	for _, m := range matches {
+		stat, err := os.Stat(m)
+		if err == nil {
+			infos = append(infos, fileInfo{path: m, mtime: stat.ModTime()})
+		} else {
+			infos = append(infos, fileInfo{path: m})
+		}
+	}
+
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].mtime.After(infos[j].mtime)
+	})
+
+	var result []string
+	for _, info := range infos {
+		result = append(result, info.path)
+	}
+
+	if len(result) == 0 {
+		return "none", nil
+	}
+	return strings.Join(result, "\n"), nil
+}
+
+func toolGrep(args map[string]interface{}) (string, error) {
+	pat, _ := args["pat"].(string)
+	root, _ := args["path"].(string)
+	if root == "" {
+		root = "."
+	}
+
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return "", err
+	}
+
+	var hits []string
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if re.MatchString(line) {
+				hits = append(hits, fmt.Sprintf("%s:%d:%s", path, i+1, strings.TrimSpace(line)))
+				if len(hits) >= 50 {
+					return io.EOF
+				}
+			}
+		}
+		return nil
+	})
+
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+
+	if len(hits) == 0 {
+		return "none", nil
+	}
+	return strings.Join(hits, "\n"), nil
+}
+
+func toolBash(args map[string]interface{}) (string, error) {
+	cmdStr, _ := args["cmd"].(string)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	out, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		if err != nil {
+			return fmt.Sprintf("error: %v", err), nil
+		}
+		return "(empty)", nil
+	}
+	return result, nil
+}
+
+func toolLs(args map[string]interface{}) (string, error) {
+	path, _ := args["path"].(string)
+	if path == "" {
+		path = "."
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		
+		typeChar := "-"
+		if entry.IsDir() {
+			typeChar = "d"
+		}
+		
+		size := info.Size()
+		name := entry.Name()
+		if entry.IsDir() {
+			name += "/"
+		}
+		
+		sb.WriteString(fmt.Sprintf("%s %8d  %s\n", typeChar, size, name))
+	}
+	
+	result := sb.String()
+	if result == "" {
+		return "(empty directory)", nil
+	}
+	return result, nil
+}
+
+func (m *model) executeTool(name string, argsJSON string) (string, error) {
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+
+	switch name {
+	case "read":
+		return toolRead(args)
+	case "write":
+		return toolWrite(args)
+	case "edit":
+		return toolEdit(args)
+	case "glob":
+		return toolGlob(args)
+	case "grep":
+		return toolGrep(args)
+	case "bash":
+		return toolBash(args)
+	case "ls":
+		return toolLs(args)
+	default:
+		return "", fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+// estimateTokens provides a rough token count estimate based on character count
+func estimateTokens(s string) int {
+	return len(s) / charsPerToken
+}
+
+// estimateHistoryTokens calculates approximate token count for the entire history
+func estimateHistoryTokens(history []openai.ChatCompletionMessageParamUnion) int {
+	total := 0
+	for _, msg := range history {
+		total += estimateMessageTokens(msg)
+	}
+	return total
+}
+
+// estimateMessageTokens estimates tokens for a single message
+func estimateMessageTokens(msg openai.ChatCompletionMessageParamUnion) int {
+	// Extract content based on message type using JSON marshaling
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return 0
+	}
+	return estimateTokens(string(data))
+}
+
+// truncateToolResult shortens a tool result while preserving useful info
+func truncateToolResult(toolName, result string) string {
+	lines := strings.Split(result, "\n")
+	lineCount := len(lines)
+	
+	if len(result) <= truncatedResultSize {
+		return result
+	}
+	
+	// Create a summary based on tool type
+	preview := result
+	if len(preview) > truncatedResultSize {
+		preview = preview[:truncatedResultSize]
+	}
+	
+	return fmt.Sprintf("[%s: %d lines] %s...", toolName, lineCount, strings.TrimSpace(preview))
+}
+
+// compactHistory reduces history size by truncating old tool results
+func compactHistory(history []openai.ChatCompletionMessageParamUnion) []openai.ChatCompletionMessageParamUnion {
+	currentTokens := estimateHistoryTokens(history)
+	
+	// If under limit, no compaction needed
+	if currentTokens < maxContextTokens {
+		return history
+	}
+	
+	// Keep first message (initial task) and last N messages intact
+	if len(history) <= recentMessagesKeep+1 {
+		return history
+	}
+	
+	compacted := make([]openai.ChatCompletionMessageParamUnion, 0, len(history))
+	
+	// Always keep first message
+	compacted = append(compacted, history[0])
+	
+	// Process middle messages - truncate tool results
+	middleEnd := len(history) - recentMessagesKeep
+	for i := 1; i < middleEnd; i++ {
+		msg := history[i]
+		
+		// Check if this is a tool result message by marshaling and inspecting
+		data, err := json.Marshal(msg)
+		if err != nil {
+			compacted = append(compacted, msg)
+			continue
+		}
+		
+		var rawMsg map[string]interface{}
+		if err := json.Unmarshal(data, &rawMsg); err != nil {
+			compacted = append(compacted, msg)
+			continue
+		}
+		
+		// Check for tool message (has tool_call_id)
+		if _, hasToolCallID := rawMsg["tool_call_id"]; hasToolCallID {
+			if content, ok := rawMsg["content"].(string); ok && len(content) > truncatedResultSize {
+				// Create truncated tool message
+				truncated := truncateToolResult("tool", content)
+				if toolCallID, ok := rawMsg["tool_call_id"].(string); ok {
+					compacted = append(compacted, openai.ToolMessage(toolCallID, truncated))
+					continue
+				}
+			}
+		}
+		
+		compacted = append(compacted, msg)
+	}
+	
+	// Keep last N messages intact
+	compacted = append(compacted, history[middleEnd:]...)
+	
+	return compacted
 }
 
 var (
@@ -174,6 +664,7 @@ var (
 		"MiniMax":    "#3498DB",
 		"Perplexity": "#E74C3C",
 		"Z.ai":       "#2ECC71",
+		"OpenAI":     "#32CD32",
 	}
 )
 
@@ -202,6 +693,11 @@ type model struct {
 	modelSelectorOpen  bool
 	currentModel       AIModel
 	selectedModelIndex int
+	executingTool      string
+	toolArguments      string
+	program            *tea.Program
+	contextTokens      int
+	appMode            AppMode
 }
 
 func initialModel() model {
@@ -251,14 +747,15 @@ func initialModel() model {
 		modelSelectorOpen:  false,
 		currentModel:       availableModels[5], // minimax/minimax-m2.1 as default
 		selectedModelIndex: 5,
+		appMode:            ModeChat, // Start in chat mode by default
 	}
 }
 
-func (m model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.spinner.Tick)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
@@ -354,6 +851,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetSession()
 			return m, nil
 
+		case tea.KeyCtrlA:
+			// Toggle between Chat and Agent mode
+			if m.appMode == ModeChat {
+				m.appMode = ModeAgent
+			} else {
+				m.appMode = ModeChat
+			}
+			return m, nil
+
 		case tea.KeyCtrlB:
 			m.modelSelectorOpen = true
 			m.historyOpen = false
@@ -390,11 +896,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.sendMessage(input), m.spinner.Tick)
 		}
 
+	case toolCallMsg:
+		m.executingTool = msg.name
+		m.toolArguments = msg.arguments
+		m.updateViewport()
+		return m, nil
+
+	case toolResultMsg:
+		m.executingTool = ""
+		m.toolArguments = ""
+		// No need to append anything here, history is updated in sendMessage goroutine
+		return m, nil
+
 	case responseMsg:
 		m.loading = false
 		m.inputTokens += msg.promptTokens
 		m.outputTokens += msg.completionTokens
 		m.history = msg.history
+		m.contextTokens = msg.contextTokens
 		displayContent := msg.content
 		if m.renderer != nil {
 			rendered, _ := m.renderer.Render(msg.content)
@@ -495,7 +1014,11 @@ func (m *model) updateViewport() {
 
 	content := strings.Join(m.messages, "\n\n")
 	if m.loading {
-		loadingMsg := fmt.Sprintf("%s\n%s Generating...", aiLabelStyle.Render("ARCANE"), m.spinner.View())
+		statusText := " Generating..."
+		if m.executingTool != "" {
+			statusText = fmt.Sprintf(" Using tool: %s...", m.executingTool)
+		}
+		loadingMsg := fmt.Sprintf("%s\n%s%s", aiLabelStyle.Render("ARCANE"), m.spinner.View(), statusText)
 		if len(m.messages) > 0 {
 			content = content + "\n\n" + loadingMsg
 		} else {
@@ -512,6 +1035,7 @@ func (m *model) resetSession() {
 	m.currentChatID = 0
 	m.inputTokens = 0
 	m.outputTokens = 0
+	m.contextTokens = 0
 	m.historyOpen = false
 	m.historyErr = nil
 	m.viewport.SetContent(getWelcomeScreen(m.viewport.Width, m.viewport.Height))
@@ -864,31 +1388,109 @@ func (m *model) loadChatFromDB(chatID int64, modelID string) error {
 	return nil
 }
 
-func (m model) sendMessage(input string) tea.Cmd {
+func (m *model) sendMessage(input string) tea.Cmd {
 	return func() tea.Msg {
-		m.history = append(m.history, openai.UserMessage(input))
-
 		ctx := context.Background()
-		resp, err := m.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-			Model:    m.currentModel.ID,
-			Messages: m.history,
-		})
-		if err != nil {
-			return errMsg(err)
+
+		// Build system prompt based on mode
+		var systemPrompt string
+		if m.appMode == ModeAgent {
+			cwd, _ := os.Getwd()
+			systemPrompt = fmt.Sprintf(agentSystemPrompt, cwd)
+		} else {
+			systemPrompt = chatSystemPrompt
 		}
 
-		if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == "" {
-			return errMsg(fmt.Errorf("empty response from model"))
+		// Build history with system prompt
+		history := []openai.ChatCompletionMessageParamUnion{
+			openai.SystemMessage(systemPrompt),
+		}
+		history = append(history, m.history...)
+		history = append(history, openai.UserMessage(input))
+
+		var totalPromptTokens int64
+		var totalCompletionTokens int64
+
+		// Chat mode: single API call without tools
+		if m.appMode == ModeChat {
+			resp, err := m.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+				Model:    m.currentModel.ID,
+				Messages: history,
+			})
+			if err != nil {
+				return errMsg(err)
+			}
+
+			if len(resp.Choices) == 0 {
+				return errMsg(fmt.Errorf("empty response from model"))
+			}
+
+			// Remove system message from history before storing
+			storedHistory := history[1:]
+			storedHistory = append(storedHistory, resp.Choices[0].Message.ToParam())
+
+			return responseMsg{
+				content:          resp.Choices[0].Message.Content,
+				promptTokens:     resp.Usage.PromptTokens,
+				completionTokens: resp.Usage.CompletionTokens,
+				history:          storedHistory,
+				contextTokens:    estimateHistoryTokens(storedHistory),
+			}
 		}
 
-		content := resp.Choices[0].Message.Content
-		m.history = append(m.history, openai.AssistantMessage(content))
+		// Agent mode: agentic loop with tools
+		for {
+			// Compact history if approaching context limit
+			history = compactHistory(history)
 
-		return responseMsg{
-			content:          content,
-			promptTokens:     resp.Usage.PromptTokens,
-			completionTokens: resp.Usage.CompletionTokens,
-			history:          m.history,
+			resp, err := m.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+				Model:    m.currentModel.ID,
+				Messages: history,
+				Tools:    toolDefinitions,
+			})
+			if err != nil {
+				return errMsg(err)
+			}
+
+			totalPromptTokens += resp.Usage.PromptTokens
+			totalCompletionTokens += resp.Usage.CompletionTokens
+
+			if len(resp.Choices) == 0 {
+				return errMsg(fmt.Errorf("empty response from model"))
+			}
+
+			choice := resp.Choices[0]
+			history = append(history, choice.Message.ToParam())
+
+			if len(choice.Message.ToolCalls) == 0 {
+				content := choice.Message.Content
+				// Remove system message from history before storing
+				storedHistory := history[1:]
+				return responseMsg{
+					content:          content,
+					promptTokens:     totalPromptTokens,
+					completionTokens: totalCompletionTokens,
+					history:          storedHistory,
+					contextTokens:    estimateHistoryTokens(storedHistory),
+				}
+			}
+
+			// Handle tool calls - notify UI for each tool
+			for _, tc := range choice.Message.ToolCalls {
+				if m.program != nil {
+					m.program.Send(toolCallMsg{name: tc.Function.Name, arguments: tc.Function.Arguments})
+				}
+
+				result, err := m.executeTool(tc.Function.Name, tc.Function.Arguments)
+				if err != nil {
+					result = fmt.Sprintf("error: %v", err)
+				}
+				history = append(history, openai.ToolMessage(tc.ID, result))
+
+				if m.program != nil {
+					m.program.Send(toolResultMsg{name: tc.Function.Name, result: result})
+				}
+			}
 		}
 	}
 }
@@ -898,7 +1500,7 @@ var (
 	outputTokenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4"))
 )
 
-func (m model) renderModelSelector() string {
+func (m *model) renderModelSelector() string {
 	title := modalTitleStyle.Render("Select AI Model")
 
 	var items []string
@@ -963,7 +1565,7 @@ func (m model) renderModelSelector() string {
 	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
 }
 
-func (m model) renderHistorySelector() string {
+func (m *model) renderHistorySelector() string {
 	title := modalTitleStyle.Render(fmt.Sprintf("Recent Chats (%d)", m.historyChatCount))
 
 	var body string
@@ -1010,7 +1612,7 @@ func (m model) renderHistorySelector() string {
 	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
 }
 
-func (m model) View() string {
+func (m *model) View() string {
 	inputBox := inputBoxStyle.Width(m.viewport.Width - 2).Render(m.textInput.View())
 
 	tokenInfo := ""
@@ -1019,6 +1621,36 @@ func (m model) View() string {
 			inputTokenStyle.Render(fmt.Sprintf("%d", m.inputTokens)),
 			outputTokenStyle.Render(fmt.Sprintf("%d", m.outputTokens)),
 		)
+	}
+
+	contextInfo := ""
+	if m.contextTokens > 0 {
+		contextPct := float64(m.contextTokens) / float64(maxContextTokens) * 100
+		contextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+		if contextPct > 80 {
+			contextStyle = contextStyle.Foreground(lipgloss.Color("#FF6B6B"))
+		} else if contextPct > 60 {
+			contextStyle = contextStyle.Foreground(lipgloss.Color("#FFAA00"))
+		}
+		contextInfo = fmt.Sprintf(" • ctx: %s", contextStyle.Render(fmt.Sprintf("%dk/%dk", m.contextTokens/1000, maxContextTokens/1000)))
+	}
+
+	// Mode indicator
+	var modeDisplay string
+	if m.appMode == ModeAgent {
+		modeDisplay = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#9B59B6")).
+			Padding(0, 1).
+			Render("AGENT")
+	} else {
+		modeDisplay = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#3498DB")).
+			Padding(0, 1).
+			Render("CHAT")
 	}
 
 	providerColor := "#545454"
@@ -1032,7 +1664,7 @@ func (m model) View() string {
 		titleStyle.Render("ARCANE AI"),
 		m.viewport.View(),
 		inputBox,
-		infoStyle(fmt.Sprintf("\n(%s • ctrl+b: models • ctrl+h: history • ctrl+n: new chat • ctrl+c: quit%s)", modelDisplay, tokenInfo)),
+		infoStyle(fmt.Sprintf("\n(%s %s • ctrl+a: mode • ctrl+b: models • ctrl+h: history • ctrl+n: new • ctrl+c: quit%s%s)", modeDisplay, modelDisplay, tokenInfo, contextInfo)),
 	)
 
 	if m.historyOpen {
@@ -1068,14 +1700,20 @@ func (m model) View() string {
 	return lipgloss.Place(m.windowWidth, m.windowHeight, lipgloss.Center, lipgloss.Top, content)
 }
 
+type programSetMsg struct {
+	program *tea.Program
+}
+
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	m := initialModel()
+	p := tea.NewProgram(&m, tea.WithAltScreen())
+	m.program = p
 	finalModel, err := p.Run()
 	if err != nil {
 		fmt.Printf("Error: %v", err)
 		os.Exit(1)
 	}
-	if m, ok := finalModel.(model); ok {
+	if m, ok := finalModel.(*model); ok {
 		if m.db != nil {
 			_ = m.db.Close()
 		}
