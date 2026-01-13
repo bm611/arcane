@@ -1,8 +1,10 @@
 # Arcane
 
+![Arcane](arcane.png)
+
 A minimal AI chat TUI built with Go using the [Bubble Tea](https://github.com/charmbracelet/bubbletea) framework.
 
-![Go](https://img.shields.io/badge/Go-00ADD8?style=flat&logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-90CAF9?style=flat&logo=go&logoColor=white)
 
 ## Features
 
