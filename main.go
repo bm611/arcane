@@ -29,6 +29,7 @@ const (
 	maxChatWidth = 100
 	modalWidth   = 60
 	contentWidth = 54
+	sidebarWidth = 30
 
 	historyListLimit = 50
 
@@ -41,6 +42,9 @@ const (
 	recentMessagesKeep  = 10     // Number of recent messages to keep intact
 	charsPerToken       = 4      // Rough estimate for token calculation
 	truncatedResultSize = 200    // Max chars for truncated tool results
+
+	// Agent loop limit
+	maxToolIterations = 15 // Max tool call rounds before forcing a response
 )
 
 // AppMode represents the current operating mode of the application
@@ -123,8 +127,78 @@ type toolCallMsg struct {
 }
 
 type toolResultMsg struct {
-	name   string
-	result string
+	name    string
+	result  string
+	summary string // Brief summary of the action taken
+}
+
+// ToolAction represents a completed tool action for display
+type ToolAction struct {
+	Name    string
+	Summary string
+}
+
+// generateToolSummary creates a brief summary of a tool action
+func generateToolSummary(name string, argsJSON string, result string) string {
+	var args map[string]interface{}
+	json.Unmarshal([]byte(argsJSON), &args)
+
+	switch name {
+	case "read":
+		path, _ := args["path"].(string)
+		lines := strings.Count(result, "\n")
+		if lines == 0 && result != "" {
+			lines = 1
+		}
+		return fmt.Sprintf("READ %s (%d lines)", filepath.Base(path), lines)
+	case "write":
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		lines := strings.Count(content, "\n") + 1
+		return fmt.Sprintf("WRITE %s (%d lines)", filepath.Base(path), lines)
+	case "edit":
+		path, _ := args["path"].(string)
+		if strings.Contains(result, "error") {
+			return fmt.Sprintf("EDIT %s (failed)", filepath.Base(path))
+		}
+		return fmt.Sprintf("EDIT %s", filepath.Base(path))
+	case "glob":
+		pat, _ := args["pat"].(string)
+		matches := strings.Count(result, "\n")
+		if result == "none" {
+			matches = 0
+		} else if matches == 0 && result != "" {
+			matches = 1
+		}
+		return fmt.Sprintf("GLOB %s (%d files)", pat, matches)
+	case "grep":
+		pat, _ := args["pat"].(string)
+		matches := strings.Count(result, "\n")
+		if result == "none" {
+			matches = 0
+		} else if matches == 0 && result != "" {
+			matches = 1
+		}
+		return fmt.Sprintf("GREP \"%s\" (%d matches)", pat, matches)
+	case "bash":
+		cmd, _ := args["cmd"].(string)
+		if len(cmd) > 30 {
+			cmd = cmd[:27] + "..."
+		}
+		return fmt.Sprintf("BASH %s", cmd)
+	case "ls":
+		path, _ := args["path"].(string)
+		if path == "" {
+			path = "."
+		}
+		entries := strings.Count(result, "\n")
+		if result == "(empty directory)" {
+			entries = 0
+		}
+		return fmt.Sprintf("LS %s (%d entries)", path, entries)
+	default:
+		return fmt.Sprintf("%s called", strings.ToUpper(name))
+	}
 }
 
 var toolDefinitions = []openai.ChatCompletionToolUnionParam{
@@ -606,6 +680,51 @@ var (
 			Foreground(lipgloss.Color("#FF6B6B")).
 			Bold(true)
 
+	toolActionStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888888")).
+			PaddingLeft(2)
+
+	toolIconStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#9B59B6")).
+			Bold(true)
+
+	toolNameStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#E67E22")).
+			Bold(true)
+
+	toolDetailStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#545454"))
+
+	sidebarStyle = lipgloss.NewStyle().
+			BorderLeft(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#545454")).
+			PaddingLeft(1).
+			PaddingRight(1).
+			PaddingTop(1)
+
+	sidebarTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#7D56F4")).
+				MarginBottom(0)
+
+	sidebarLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: "#555555", Dark: "#AAAAAA"})
+
+	sidebarValueStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.AdaptiveColor{Light: "#1a1a2e", Dark: "#FFFFFF"})
+
+	sidebarDividerStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3a3a3a"))
+
+	sidebarShortcutKeyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#E67E22")).
+				Bold(true)
+
+	sidebarShortcutDescStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#888888"))
+
 	inputBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#545454")).
@@ -695,6 +814,7 @@ type model struct {
 	selectedModelIndex int
 	executingTool      string
 	toolArguments      string
+	toolActions        []ToolAction // Completed tool actions for current response
 	program            *tea.Program
 	contextTokens      int
 	appMode            AppMode
@@ -905,7 +1025,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolResultMsg:
 		m.executingTool = ""
 		m.toolArguments = ""
-		// No need to append anything here, history is updated in sendMessage goroutine
+		// Store the completed tool action for display
+		m.toolActions = append(m.toolActions, ToolAction{
+			Name:    msg.name,
+			Summary: msg.summary,
+		})
+		m.updateViewport()
 		return m, nil
 
 	case responseMsg:
@@ -919,7 +1044,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rendered, _ := m.renderer.Render(msg.content)
 			displayContent = strings.TrimSpace(rendered)
 		}
-		m.messages = append(m.messages, formatAIMessage(displayContent))
+		// If there were tool actions, prepend them to the message
+		if len(m.toolActions) > 0 {
+			toolDisplay := formatToolActions(m.toolActions)
+			m.messages = append(m.messages, formatAIMessageWithTools(toolDisplay, displayContent))
+		} else {
+			m.messages = append(m.messages, formatAIMessage(displayContent))
+		}
+		m.toolActions = nil // Clear for next response
 		if err := m.persistAssistantMessage(msg.content); err != nil {
 			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("History error: %v", err)))
 		}
@@ -936,20 +1068,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
 		m.windowHeight = msg.Height
-		contentWidth := msg.Width
-		if contentWidth > maxChatWidth {
-			contentWidth = maxChatWidth
+		// Calculate chat width (left side) accounting for sidebar
+		chatWidth := msg.Width - sidebarWidth
+		if chatWidth > maxChatWidth {
+			chatWidth = maxChatWidth
 		}
-		m.viewport.Width = contentWidth
+		m.viewport.Width = chatWidth - 2
 		m.viewport.Height = msg.Height - 6
-		m.textInput.Width = contentWidth - 4
+		m.textInput.Width = chatWidth - 6
 		glamourStyle := "dark"
 		if !lipgloss.HasDarkBackground() {
 			glamourStyle = "light"
 		}
 		m.renderer, _ = glamour.NewTermRenderer(
 			glamour.WithStylePath(glamourStyle),
-			glamour.WithWordWrap(contentWidth-4),
+			glamour.WithWordWrap(chatWidth-6),
 		)
 		m.updateViewport()
 		return m, tea.Batch(tiCmd, vpCmd)
@@ -981,6 +1114,22 @@ func formatAIMessage(content string) string {
 	label := aiLabelStyle.Render("ARCANE")
 	msg := aiMsgStyle.Render(content)
 	return fmt.Sprintf("%s\n%s", label, msg)
+}
+
+func formatToolActions(actions []ToolAction) string {
+	var lines []string
+	for _, action := range actions {
+		icon := toolIconStyle.Render("●")
+		name := toolNameStyle.Render(action.Summary)
+		lines = append(lines, toolActionStyle.Render(fmt.Sprintf("%s %s", icon, name)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatAIMessageWithTools(toolDisplay, content string) string {
+	label := aiLabelStyle.Render("ARCANE")
+	msg := aiMsgStyle.Render(content)
+	return fmt.Sprintf("%s\n%s\n%s", label, toolDisplay, msg)
 }
 
 func getWelcomeScreen(width, height int) string {
@@ -1016,9 +1165,22 @@ func (m *model) updateViewport() {
 	if m.loading {
 		statusText := " Generating..."
 		if m.executingTool != "" {
-			statusText = fmt.Sprintf(" Using tool: %s...", m.executingTool)
+			statusText = fmt.Sprintf(" %s...", m.executingTool)
 		}
-		loadingMsg := fmt.Sprintf("%s\n%s%s", aiLabelStyle.Render("ARCANE"), m.spinner.View(), statusText)
+		
+		// Build loading message with completed tool actions
+		var loadingParts []string
+		loadingParts = append(loadingParts, aiLabelStyle.Render("ARCANE"))
+		
+		// Show completed tool actions
+		if len(m.toolActions) > 0 {
+			loadingParts = append(loadingParts, formatToolActions(m.toolActions))
+		}
+		
+		// Show current status (spinner + status text)
+		loadingParts = append(loadingParts, fmt.Sprintf("%s%s", m.spinner.View(), statusText))
+		
+		loadingMsg := strings.Join(loadingParts, "\n")
 		if len(m.messages) > 0 {
 			content = content + "\n\n" + loadingMsg
 		} else {
@@ -1439,7 +1601,10 @@ func (m *model) sendMessage(input string) tea.Cmd {
 		}
 
 		// Agent mode: agentic loop with tools
+		iteration := 0
 		for {
+			iteration++
+			
 			// Compact history if approaching context limit
 			history = compactHistory(history)
 
@@ -1462,8 +1627,11 @@ func (m *model) sendMessage(input string) tea.Cmd {
 			choice := resp.Choices[0]
 			history = append(history, choice.Message.ToParam())
 
-			if len(choice.Message.ToolCalls) == 0 {
+			if len(choice.Message.ToolCalls) == 0 || iteration >= maxToolIterations {
 				content := choice.Message.Content
+				if iteration >= maxToolIterations && len(choice.Message.ToolCalls) > 0 {
+					content = content + "\n\n*[Stopped after " + fmt.Sprint(maxToolIterations) + " tool iterations]*"
+				}
 				// Remove system message from history before storing
 				storedHistory := history[1:]
 				return responseMsg{
@@ -1488,7 +1656,8 @@ func (m *model) sendMessage(input string) tea.Cmd {
 				history = append(history, openai.ToolMessage(tc.ID, result))
 
 				if m.program != nil {
-					m.program.Send(toolResultMsg{name: tc.Function.Name, result: result})
+					summary := generateToolSummary(tc.Function.Name, tc.Function.Arguments, result)
+					m.program.Send(toolResultMsg{name: tc.Function.Name, result: result, summary: summary})
 				}
 			}
 		}
@@ -1612,60 +1781,129 @@ func (m *model) renderHistorySelector() string {
 	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
 }
 
-func (m *model) View() string {
-	inputBox := inputBoxStyle.Width(m.viewport.Width - 2).Render(m.textInput.View())
+func (m *model) renderSidebar(height int) string {
+	w := sidebarWidth - 3 // Account for border and padding
+	divider := sidebarDividerStyle.Render(strings.Repeat("─", w))
 
-	tokenInfo := ""
-	if m.inputTokens > 0 || m.outputTokens > 0 {
-		tokenInfo = fmt.Sprintf(" • in: %s out: %s",
-			inputTokenStyle.Render(fmt.Sprintf("%d", m.inputTokens)),
-			outputTokenStyle.Render(fmt.Sprintf("%d", m.outputTokens)),
-		)
+	var sections []string
+
+	// Model section
+	providerColor := "#545454"
+	if c, ok := providerColors[m.currentModel.Provider]; ok {
+		providerColor = c
 	}
+	modelSection := lipgloss.JoinVertical(lipgloss.Left,
+		sidebarTitleStyle.Render("MODEL"),
+		sidebarValueStyle.Render(truncateRunes(m.currentModel.Name, w)),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(providerColor)).Italic(true).Render(m.currentModel.Provider),
+	)
+	sections = append(sections, modelSection, divider)
 
-	contextInfo := ""
-	if m.contextTokens > 0 {
-		contextPct := float64(m.contextTokens) / float64(maxContextTokens) * 100
-		contextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
-		if contextPct > 80 {
-			contextStyle = contextStyle.Foreground(lipgloss.Color("#FF6B6B"))
-		} else if contextPct > 60 {
-			contextStyle = contextStyle.Foreground(lipgloss.Color("#FFAA00"))
-		}
-		contextInfo = fmt.Sprintf(" • ctx: %s", contextStyle.Render(fmt.Sprintf("%dk/%dk", m.contextTokens/1000, maxContextTokens/1000)))
-	}
-
-	// Mode indicator
-	var modeDisplay string
+	// Mode section
+	var modeBadge string
 	if m.appMode == ModeAgent {
-		modeDisplay = lipgloss.NewStyle().
+		modeBadge = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
 			Background(lipgloss.Color("#9B59B6")).
 			Padding(0, 1).
 			Render("AGENT")
 	} else {
-		modeDisplay = lipgloss.NewStyle().
+		modeBadge = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
 			Background(lipgloss.Color("#3498DB")).
 			Padding(0, 1).
 			Render("CHAT")
 	}
-
-	providerColor := "#545454"
-	if c, ok := providerColors[m.currentModel.Provider]; ok {
-		providerColor = c
-	}
-	modelDisplay := lipgloss.NewStyle().Foreground(lipgloss.Color(providerColor)).Render(m.currentModel.Name)
-
-	content := fmt.Sprintf(
-		"%s\n\n%s\n\n%s\n%s",
-		titleStyle.Render("ARCANE AI"),
-		m.viewport.View(),
-		inputBox,
-		infoStyle(fmt.Sprintf("\n(%s %s • ctrl+a: mode • ctrl+b: models • ctrl+h: history • ctrl+n: new • ctrl+c: quit%s%s)", modeDisplay, modelDisplay, tokenInfo, contextInfo)),
+	modeSection := lipgloss.JoinVertical(lipgloss.Left,
+		sidebarTitleStyle.Render("MODE"),
+		modeBadge,
 	)
+	sections = append(sections, modeSection, divider)
+
+	// Context section
+	contextPct := 0.0
+	if m.contextTokens > 0 {
+		contextPct = float64(m.contextTokens) / float64(maxContextTokens) * 100
+	}
+	barWidth := w - 2
+	filled := int(float64(barWidth) * contextPct / 100)
+	if filled > barWidth {
+		filled = barWidth
+	}
+	barColor := "#2ECC71" // Green
+	if contextPct > 80 {
+		barColor = "#FF6B6B" // Red
+	} else if contextPct > 60 {
+		barColor = "#FFAA00" // Yellow
+	}
+	bar := lipgloss.NewStyle().Foreground(lipgloss.Color(barColor)).Render(strings.Repeat("█", filled)) +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#3a3a3a")).Render(strings.Repeat("░", barWidth-filled))
+	contextText := fmt.Sprintf("%dk/%dk", m.contextTokens/1000, maxContextTokens/1000)
+	contextSection := lipgloss.JoinVertical(lipgloss.Left,
+		sidebarTitleStyle.Render("CONTEXT"),
+		sidebarLabelStyle.Render(contextText),
+		bar,
+	)
+	sections = append(sections, contextSection, divider)
+
+	// Tokens section
+	inTokens := fmt.Sprintf("%d", m.inputTokens)
+	outTokens := fmt.Sprintf("%d", m.outputTokens)
+	tokenSection := lipgloss.JoinVertical(lipgloss.Left,
+		sidebarTitleStyle.Render("TOKENS"),
+		sidebarLabelStyle.Render("In:  ")+inputTokenStyle.Render(inTokens),
+		sidebarLabelStyle.Render("Out: ")+outputTokenStyle.Render(outTokens),
+	)
+	sections = append(sections, tokenSection, divider)
+
+	// Shortcuts section
+	shortcuts := []struct {
+		key  string
+		desc string
+	}{
+		{"^A", "mode"},
+		{"^B", "models"},
+		{"^H", "history"},
+		{"^N", "new"},
+		{"^C", "quit"},
+	}
+	shortcutLines := []string{sidebarTitleStyle.Render("SHORTCUTS")}
+	for _, s := range shortcuts {
+		line := sidebarShortcutKeyStyle.Render(s.key) + " " + sidebarShortcutDescStyle.Render(s.desc)
+		shortcutLines = append(shortcutLines, line)
+	}
+	shortcutSection := lipgloss.JoinVertical(lipgloss.Left, shortcutLines...)
+	sections = append(sections, shortcutSection)
+
+	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
+	return sidebarStyle.Height(height).Width(sidebarWidth).Render(content)
+}
+
+func (m *model) View() string {
+	chatWidth := m.windowWidth - sidebarWidth
+	if chatWidth > maxChatWidth {
+		chatWidth = maxChatWidth
+	}
+	inputBox := inputBoxStyle.Width(chatWidth - 4).Render(m.textInput.View())
+
+	// Build chat area (left side) - centered
+	chatAreaWidth := m.windowWidth - sidebarWidth
+	chatContent := lipgloss.JoinVertical(lipgloss.Center,
+		titleStyle.Render("ARCANE AI"),
+		"",
+		m.viewport.View(),
+		"",
+		inputBox,
+	)
+	chatArea := lipgloss.PlaceHorizontal(chatAreaWidth, lipgloss.Center, chatContent)
+
+	// Build sidebar (right side)
+	sidebar := m.renderSidebar(m.windowHeight - 2)
+
+	// Combine: centered chat + sidebar at far right
+	content := lipgloss.JoinHorizontal(lipgloss.Top, chatArea, sidebar)
 
 	if m.historyOpen {
 		modal := m.renderHistorySelector()
@@ -1697,7 +1935,7 @@ func (m *model) View() string {
 			))
 	}
 
-	return lipgloss.Place(m.windowWidth, m.windowHeight, lipgloss.Center, lipgloss.Top, content)
+	return content
 }
 
 type programSetMsg struct {
