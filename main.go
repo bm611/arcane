@@ -641,7 +641,7 @@ func compactHistory(history []openai.ChatCompletionMessageParamUnion) []openai.C
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#7D56F4")).
+			Foreground(lipgloss.Color("#B39DDB")).
 			Padding(0, 1)
 
 	infoStyle = lipgloss.NewStyle().
@@ -650,7 +650,7 @@ var (
 
 	userLabelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#00ADD8")).
+			Background(lipgloss.Color("#90CAF9")).
 			Bold(true).
 			Padding(0, 1).
 			MarginRight(1)
@@ -660,11 +660,11 @@ var (
 			PaddingLeft(2).
 			BorderLeft(true).
 			BorderStyle(lipgloss.ThickBorder()).
-			BorderForeground(lipgloss.Color("#00ADD8"))
+			BorderForeground(lipgloss.Color("#90CAF9"))
 
 	aiLabelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#7D56F4")).
+			Background(lipgloss.Color("#B39DDB")).
 			Bold(true).
 			Padding(0, 1).
 			MarginRight(1)
@@ -674,10 +674,10 @@ var (
 			PaddingTop(1).
 			BorderLeft(true).
 			BorderStyle(lipgloss.ThickBorder()).
-			BorderForeground(lipgloss.Color("#7D56F4"))
+			BorderForeground(lipgloss.Color("#B39DDB"))
 
 	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF6B6B")).
+			Foreground(lipgloss.Color("#EF9A9A")).
 			Bold(true)
 
 	toolActionStyle = lipgloss.NewStyle().
@@ -685,11 +685,11 @@ var (
 			PaddingLeft(2)
 
 	toolIconStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9B59B6")).
+			Foreground(lipgloss.Color("#CE93D8")).
 			Bold(true)
 
 	toolNameStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#E67E22")).
+			Foreground(lipgloss.Color("#FFCC80")).
 			Bold(true)
 
 	toolDetailStyle = lipgloss.NewStyle().
@@ -705,7 +705,7 @@ var (
 
 	sidebarTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#7D56F4")).
+				Foreground(lipgloss.Color("#B39DDB")).
 				MarginBottom(0)
 
 	sidebarLabelStyle = lipgloss.NewStyle().
@@ -719,19 +719,19 @@ var (
 				Foreground(lipgloss.Color("#3a3a3a"))
 
 	sidebarShortcutKeyStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#E67E22")).
+				Foreground(lipgloss.Color("#FFCC80")).
 				Bold(true)
 
 	sidebarShortcutDescStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#888888"))
 
 	inputBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#545454")).
+			Border(lipgloss.ThickBorder()).
+			BorderForeground(lipgloss.Color("#B39DDB")).
 			Padding(0, 1)
 
 	welcomeArtStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7D56F4")).
+			Foreground(lipgloss.Color("#B39DDB")).
 			Bold(true)
 
 	welcomeSubtitleStyle = lipgloss.NewStyle().
@@ -740,12 +740,12 @@ var (
 
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#7D56F4")).
+			BorderForeground(lipgloss.Color("#B39DDB")).
 			Padding(1, 2)
 
 	modalTitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#7D56F4")).
+			Foreground(lipgloss.Color("#B39DDB")).
 			Width(contentWidth).
 			MarginBottom(1)
 
@@ -777,13 +777,13 @@ var (
 
 var (
 	providerColors = map[string]string{
-		"Google":     "#9B59B6",
-		"xAI":        "#E67E22",
-		"DeepSeek":   "#1ABC9C",
-		"MiniMax":    "#3498DB",
-		"Perplexity": "#E74C3C",
-		"Z.ai":       "#2ECC71",
-		"OpenAI":     "#32CD32",
+		"Google":     "#CE93D8",
+		"xAI":        "#FFCC80",
+		"DeepSeek":   "#80CBC4",
+		"MiniMax":    "#81D4FA",
+		"Perplexity": "#EF9A9A",
+		"Z.ai":       "#A5D6A7",
+		"OpenAI":     "#A5D6A7",
 	}
 )
 
@@ -836,13 +836,15 @@ func initialModel() model {
 
 	ti := textinput.New()
 	ti.Placeholder = "Type a message..."
+	ti.Prompt = "❯ "
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Bold(true)
 	ti.CharLimit = 1000
 	ti.Width = 80
 	ti.Focus()
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4"))
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB"))
 
 	vp := viewport.New(60, 15)
 
@@ -1665,8 +1667,8 @@ func (m *model) sendMessage(input string) tea.Cmd {
 }
 
 var (
-	inputTokenStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ADD8"))
-	outputTokenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4"))
+	inputTokenStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#90CAF9"))
+	outputTokenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB"))
 )
 
 func (m *model) renderModelSelector() string {
@@ -1707,8 +1709,8 @@ func (m *model) renderModelSelector() string {
 		} else {
 			// For non-selected, apply provider color to the provider text
 			row1Styled := fmt.Sprintf("%s%s %s  %s",
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4")).Render(cursor),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#00ADD8")).Render(status),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Render(cursor),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#90CAF9")).Render(status),
 				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1a1a2e", Dark: "#FFFFFF"}).Render(mdl.Name),
 				lipgloss.NewStyle().Foreground(lipgloss.Color(providerColor)).Render(mdl.Provider),
 			)
@@ -1805,14 +1807,14 @@ func (m *model) renderSidebar(height int) string {
 		modeBadge = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#9B59B6")).
+			Background(lipgloss.Color("#CE93D8")).
 			Padding(0, 1).
 			Render("AGENT")
 	} else {
 		modeBadge = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#3498DB")).
+			Background(lipgloss.Color("#81D4FA")).
 			Padding(0, 1).
 			Render("CHAT")
 	}
@@ -1832,11 +1834,11 @@ func (m *model) renderSidebar(height int) string {
 	if filled > barWidth {
 		filled = barWidth
 	}
-	barColor := "#2ECC71" // Green
+	barColor := "#A5D6A7" // Green
 	if contextPct > 80 {
-		barColor = "#FF6B6B" // Red
+		barColor = "#EF9A9A" // Red
 	} else if contextPct > 60 {
-		barColor = "#FFAA00" // Yellow
+		barColor = "#FFF59D" // Yellow
 	}
 	bar := lipgloss.NewStyle().Foreground(lipgloss.Color(barColor)).Render(strings.Repeat("█", filled)) +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#3a3a3a")).Render(strings.Repeat("░", barWidth-filled))
