@@ -189,8 +189,8 @@ func initialModel() model {
 		historyChats:       nil,
 		historyErr:         nil,
 		modelSelectorOpen:  false,
-		currentModel:       availableModels[5], // minimax/minimax-m2.1 as default
-		selectedModelIndex: 5,
+		currentModel:       availableModels[0], // Gemini Flash as default
+		selectedModelIndex: 0,
 		appMode:            models.ModeChat, // Start in chat mode by default
 	}
 }
@@ -469,10 +469,10 @@ func getWelcomeScreen(width, height int) string {
 
     ✧ ·──────────────────────────────────────────────────· ✧
 `
-	subtitle := "The Arcane terminal awaits your command..."
+	subtitle := "“Code is not just logic, it is the architecture of imagination.”"
 
 	styledArt := styles.WelcomeArtStyle.Render(art)
-	styledSubtitle := styles.WelcomeSubtitleStyle.Render(subtitle)
+	styledSubtitle := styles.WelcomeSubtitleStyle.Italic(true).Render(subtitle)
 
 	content := lipgloss.JoinVertical(lipgloss.Center, styledArt, "", styledSubtitle)
 
