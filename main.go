@@ -33,10 +33,10 @@ const (
 	historyListLimit = 50
 
 	// Context window management
-	maxContextTokens    = 100000 // Target max tokens before compaction
-	recentMessagesKeep  = 10     // Number of recent messages to keep intact
-	charsPerToken       = 4      // Rough estimate for token calculation
-	truncatedResultSize = 200    // Max chars for truncated tool results
+	maxContextTokens    = 80000 // Target max tokens before compaction (lowered for earlier compaction)
+	recentMessagesKeep  = 6     // Number of recent messages to keep intact
+	charsPerToken       = 4     // Rough estimate for token calculation
+	truncatedResultSize = 500   // Max chars for truncated tool results (increased for better context)
 
 	// Agent loop limit
 	maxToolIterations = 15 // Max tool call rounds before forcing a response
@@ -44,26 +44,24 @@ const (
 
 const chatSystemPrompt = `You are Arcane, a helpful AI assistant. You engage in natural conversation, answer questions, explain concepts, and help with general tasks. You provide clear, concise, and accurate responses. You do not have access to file system tools in this mode - if the user needs file operations, suggest they switch to Agent mode with Ctrl+A.`
 
-const agentSystemPrompt = `You are Arcane, an AI coding assistant with full access to the file system. You can read, write, and edit files, search codebases, and run shell commands to help users with software development tasks.
+const agentSystemPrompt = `You are Arcane, an AI coding assistant with full access to the file system.
 
-Available tools:
-- ls: List directory contents (defaults to current directory)
-- read: Read file contents with line numbers
+Tools (all have output limits to save context):
+- ls: List directory contents
+- read: Read file (default 200 lines, use offset/limit for more)
 - write: Create or overwrite files
-- edit: Find and replace text in files (old string must be unique)
-- glob: Find files by pattern, sorted by modification time
-- grep: Search files for regex patterns
-- bash: Run shell commands (30s timeout)
+- edit: Find and replace text (old string must be unique)
+- glob: Find files by pattern
+- grep: Search for regex (max 30 results, 5 per file)
+- bash: Run shell commands (30s timeout, output truncated)
 
 Guidelines:
-- Always read files before editing to understand context
+- Read files before editing. Use offset parameter for large files.
 - Make minimal, targeted changes
-- Use ls and glob to explore the codebase structure first
-- Verify your changes when possible by reading the file after editing
-- If you call tools, wait for the tool results before answering and base your answer strictly on those results
-- Be concise in explanations, focus on the task
+- Use grep with specific paths to narrow searches
+- Be concise, focus on the task
 
-Current working directory: %s`
+Working directory: %s`
 
 var availableModels = []models.AIModel{
 	{ID: "google/gemini-3-flash-preview", Name: "Gemini 3 Flash Preview", Provider: "Google", Description: "Fast multimodal model"},

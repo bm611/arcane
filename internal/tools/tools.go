@@ -192,6 +192,11 @@ func GenerateToolSummary(name string, argsJSON string, result string) string {
 	}
 }
 
+const (
+	defaultReadLimit = 200 // Default max lines to read
+	maxLineWidth     = 500 // Truncate very long lines
+)
+
 func ToolRead(args map[string]interface{}) (string, error) {
 	path, _ := args["path"].(string)
 	offset, _ := args["offset"].(float64)
@@ -203,6 +208,8 @@ func ToolRead(args map[string]interface{}) (string, error) {
 	}
 
 	lines := strings.Split(string(data), "\n")
+	totalLines := len(lines)
+
 	start := int(offset)
 	if start < 0 {
 		start = 0
@@ -211,19 +218,32 @@ func ToolRead(args map[string]interface{}) (string, error) {
 		start = len(lines)
 	}
 
-	end := len(lines)
-	if limit > 0 {
-		end = start + int(limit)
-		if end > len(lines) {
-			end = len(lines)
-		}
+	// Apply default limit if not specified
+	if limit == 0 {
+		limit = defaultReadLimit
+	}
+
+	end := start + int(limit)
+	if end > len(lines) {
+		end = len(lines)
 	}
 
 	selected := lines[start:end]
 	var sb strings.Builder
 	for i, line := range selected {
+		// Truncate very long lines to save context
+		if len(line) > maxLineWidth {
+			line = line[:maxLineWidth] + "..."
+		}
 		sb.WriteString(fmt.Sprintf("%4d| %s\n", start+i+1, line))
 	}
+
+	// Indicate if there are more lines
+	remaining := totalLines - end
+	if remaining > 0 {
+		sb.WriteString(fmt.Sprintf("\n[... %d more lines. Use offset=%d to continue reading]\n", remaining, end))
+	}
+
 	return sb.String(), nil
 }
 
@@ -316,6 +336,12 @@ func ToolGlob(args map[string]interface{}) (string, error) {
 	return strings.Join(result, "\n"), nil
 }
 
+const (
+	maxGrepHits       = 30  // Reduced from 50 to save context
+	maxGrepLineLen    = 120 // Truncate long matching lines
+	maxHitsPerFile    = 5   // Limit matches per file to avoid flooding
+)
+
 func ToolGrep(args map[string]interface{}) (string, error) {
 	pat, _ := args["pat"].(string)
 	root, _ := args["path"].(string)
@@ -329,8 +355,16 @@ func ToolGrep(args map[string]interface{}) (string, error) {
 	}
 
 	var hits []string
+	skippedFiles := 0
 	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
+			return nil
+		}
+		// Skip common non-code directories
+		if strings.Contains(path, "node_modules") ||
+			strings.Contains(path, ".git/") ||
+			strings.Contains(path, "vendor/") ||
+			strings.Contains(path, "__pycache__") {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -338,10 +372,21 @@ func ToolGrep(args map[string]interface{}) (string, error) {
 			return nil
 		}
 		lines := strings.Split(string(data), "\n")
+		fileHits := 0
 		for i, line := range lines {
 			if re.MatchString(line) {
-				hits = append(hits, fmt.Sprintf("%s:%d:%s", path, i+1, strings.TrimSpace(line)))
-				if len(hits) >= 50 {
+				matchLine := strings.TrimSpace(line)
+				// Truncate long lines
+				if len(matchLine) > maxGrepLineLen {
+					matchLine = matchLine[:maxGrepLineLen] + "..."
+				}
+				hits = append(hits, fmt.Sprintf("%s:%d:%s", path, i+1, matchLine))
+				fileHits++
+				if fileHits >= maxHitsPerFile {
+					skippedFiles++
+					break
+				}
+				if len(hits) >= maxGrepHits {
 					return io.EOF
 				}
 			}
@@ -356,8 +401,15 @@ func ToolGrep(args map[string]interface{}) (string, error) {
 	if len(hits) == 0 {
 		return "none", nil
 	}
-	return strings.Join(hits, "\n"), nil
+
+	result := strings.Join(hits, "\n")
+	if len(hits) >= maxGrepHits || skippedFiles > 0 {
+		result += fmt.Sprintf("\n[Results limited. Use a more specific pattern or path to narrow search]")
+	}
+	return result, nil
 }
+
+const maxBashOutput = 4000 // Limit bash output to prevent context bloat
 
 func ToolBash(args map[string]interface{}) (string, error) {
 	cmdStr, _ := args["cmd"].(string)
@@ -373,6 +425,21 @@ func ToolBash(args map[string]interface{}) (string, error) {
 		}
 		return "(empty)", nil
 	}
+
+	// Truncate large outputs
+	if len(result) > maxBashOutput {
+		lines := strings.Split(result, "\n")
+		// Keep first and last portions
+		if len(lines) > 20 {
+			head := strings.Join(lines[:10], "\n")
+			tail := strings.Join(lines[len(lines)-10:], "\n")
+			truncated := len(lines) - 20
+			result = fmt.Sprintf("%s\n\n[... %d lines truncated ...]\n\n%s", head, truncated, tail)
+		} else {
+			result = result[:maxBashOutput] + "\n[... output truncated]"
+		}
+	}
+
 	return result, nil
 }
 
