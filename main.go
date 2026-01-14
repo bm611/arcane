@@ -441,7 +441,7 @@ func formatAIMessage(content string) string {
 func formatToolActions(actions []models.ToolAction) string {
 	var lines []string
 	for _, action := range actions {
-		icon := styles.ToolIconStyle.Render("●")
+		icon := styles.ToolIconStyle.Render("→")
 		name := styles.ToolNameStyle.Render(action.Summary)
 		lines = append(lines, styles.ToolActionStyle.Render(fmt.Sprintf("%s %s", icon, name)))
 	}
