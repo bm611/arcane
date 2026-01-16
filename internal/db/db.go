@@ -113,15 +113,16 @@ func TouchChat(db *sql.DB, chatID int64, nowUnix int64) error {
 	return err
 }
 
-func GetRecentChats(db *sql.DB, limit int) (int, []models.ChatListItem, error) {
+func GetRecentChats(db *sql.DB, limit, offset int) (int, []models.ChatListItem, error) {
 	var count int
 	if err := db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&count); err != nil {
 		return 0, nil, err
 	}
 
 	rows, err := db.Query(
-		"SELECT id, updated_at, last_user_prompt, model_id FROM chats ORDER BY updated_at DESC LIMIT ?",
+		"SELECT id, updated_at, last_user_prompt, model_id FROM chats ORDER BY updated_at DESC LIMIT ? OFFSET ?",
 		limit,
+		offset,
 	)
 	if err != nil {
 		return 0, nil, err

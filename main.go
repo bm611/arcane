@@ -30,7 +30,8 @@ const (
 	modalWidth   = 60
 	sidebarWidth = 30
 
-	historyListLimit = 50
+	historyListLimit   = 50
+	historyPageSize    = 10
 
 	// Context window management
 	maxContextTokens    = 80000 // Target max tokens before compaction (lowered for earlier compaction)
@@ -129,6 +130,7 @@ type model struct {
 	historyChatCount   int
 	historyChats       []models.ChatListItem
 	historyErr         error
+	historyPage        int
 	modelSelectorOpen  bool
 	currentModel       models.AIModel
 	selectedModelIndex int
@@ -186,6 +188,7 @@ func initialModel() model {
 		historyChatCount:   0,
 		historyChats:       nil,
 		historyErr:         nil,
+		historyPage:        0,
 		modelSelectorOpen:  false,
 		currentModel:       availableModels[0], // Gemini Flash as default
 		selectedModelIndex: 0,
@@ -251,6 +254,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyOpen = false
 				m.historyErr = nil
 				return m, nil
+			case "left", "h":
+				if m.historyPage > 0 {
+					m.historyPage--
+					m.refreshHistoryFromDB()
+				}
+				return m, nil
+			case "right", "l":
+				totalPages := (m.historyChatCount + historyPageSize - 1) / historyPageSize
+				if m.historyPage < totalPages-1 {
+					m.historyPage++
+					m.refreshHistoryFromDB()
+				}
+				return m, nil
 			}
 			return m, nil
 		}
@@ -310,6 +326,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlH:
 			m.modelSelectorOpen = false
 			m.historyOpen = true
+			m.historyPage = 0
 			m.refreshHistoryFromDB()
 			return m, nil
 
@@ -812,7 +829,6 @@ func findModelByID(id string) (models.AIModel, int, bool) {
 func (m *model) refreshHistoryFromDB() {
 	m.historyErr = nil
 	m.historyChats = nil
-	m.historyChatCount = 0
 	m.historySelectedIdx = 0
 
 	if m.dbErr != nil {
@@ -824,7 +840,8 @@ func (m *model) refreshHistoryFromDB() {
 		return
 	}
 
-	count, chats, err := db.GetRecentChats(m.db, historyListLimit)
+	offset := m.historyPage * historyPageSize
+	count, chats, err := db.GetRecentChats(m.db, historyPageSize, offset)
 	if err != nil {
 		m.historyErr = err
 		return
@@ -1146,7 +1163,11 @@ func (m *model) renderModelSelector() string {
 }
 
 func (m *model) renderHistorySelector() string {
-	title := styles.ModalTitleStyle.Render(fmt.Sprintf("Recent Chats (%d)", m.historyChatCount))
+	totalPages := (m.historyChatCount + historyPageSize - 1) / historyPageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	title := styles.ModalTitleStyle.Render(fmt.Sprintf("Recent Chats (%d) - Page %d/%d", m.historyChatCount, m.historyPage+1, totalPages))
 
 	var body string
 	if m.historyErr != nil {
@@ -1167,8 +1188,6 @@ func (m *model) renderHistorySelector() string {
 			if prompt == "" {
 				prompt = "(no prompt)"
 			}
-			// One line: cursor + prompt + space + timeStr
-			// styles.ContentWidth - 2 (padding) - len(cursor) - 1 (space) - len(timeStr)
 			availableWidth := styles.ContentWidth - 2 - len(cursor) - 1 - len(timeStr)
 			prompt = truncateRunes(prompt, availableWidth)
 
@@ -1187,7 +1206,7 @@ func (m *model) renderHistorySelector() string {
 		Foreground(styles.HintColor).
 		Width(styles.ContentWidth).
 		PaddingTop(1).
-		Render("↑/↓: navigate • Enter: open • Esc: close")
+		Render("↑/↓: navigate • ←/→: page • Enter: open • Esc: close")
 
 	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
 }
