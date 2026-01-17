@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,12 +28,13 @@ import (
 )
 
 const (
-	maxChatWidth = 100
-	modalWidth   = 60
-	sidebarWidth = 30
+	maxChatWidth       = 100
+	modalWidth         = 60
+	sidebarWidth       = 30
+	compactWidthThresh = 100 // Width below which sidebar moves to bottom
 
-	historyListLimit   = 50
-	historyPageSize    = 10
+	historyListLimit = 50
+	historyPageSize  = 10
 
 	// Context window management
 	maxContextTokens    = 80000 // Target max tokens before compaction (lowered for earlier compaction)
@@ -77,6 +80,207 @@ var availableModels = []models.AIModel{
 
 type errMsg error
 
+// getFileSuggestions returns files/dirs matching a prefix, supporting subdirectory paths and recursive search
+func getFileSuggestions(prefix string) []string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	// If prefix contains a "/", do directory-specific search
+	if strings.Contains(prefix, "/") {
+		return getDirectorySuggestions(cwd, prefix)
+	}
+
+	// Otherwise, do recursive fuzzy search
+	return getRecursiveSuggestions(cwd, prefix)
+}
+
+// getDirectorySuggestions handles paths like "internal/tools/"
+func getDirectorySuggestions(cwd, prefix string) []string {
+	dir := ""
+	filePrefix := prefix
+
+	if idx := strings.LastIndex(prefix, "/"); idx != -1 {
+		dir = prefix[:idx+1]
+		filePrefix = prefix[idx+1:]
+	}
+
+	searchDir := cwd
+	if dir != "" {
+		searchDir = filepath.Join(cwd, dir)
+	}
+
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil
+	}
+
+	var suggestions []string
+	lowerFilePrefix := strings.ToLower(filePrefix)
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(filePrefix, ".") {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(name), lowerFilePrefix) {
+			fullPath := dir + name
+			suggestions = append(suggestions, fullPath)
+		}
+	}
+
+	return sortAndLimitSuggestions(cwd, suggestions)
+}
+
+// getRecursiveSuggestions searches all files recursively for matches
+func getRecursiveSuggestions(cwd, prefix string) []string {
+	var suggestions []string
+	lowerPrefix := strings.ToLower(prefix)
+
+	filepath.Walk(cwd, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		// Skip hidden directories and common non-code directories
+		name := info.Name()
+		if info.IsDir() {
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "__pycache__" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Skip hidden files unless searching for them
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
+			return nil
+		}
+
+		// Match against filename
+		if strings.Contains(strings.ToLower(name), lowerPrefix) {
+			relPath, _ := filepath.Rel(cwd, path)
+			suggestions = append(suggestions, relPath)
+		}
+
+		// Stop if we have enough suggestions
+		if len(suggestions) >= 20 {
+			return filepath.SkipAll
+		}
+
+		return nil
+	})
+
+	return sortAndLimitSuggestions(cwd, suggestions)
+}
+
+// sortAndLimitSuggestions sorts by directories first, then alphabetically, and limits results
+func sortAndLimitSuggestions(cwd string, suggestions []string) []string {
+	sort.Slice(suggestions, func(i, j int) bool {
+		iInfo, _ := os.Stat(filepath.Join(cwd, suggestions[i]))
+		jInfo, _ := os.Stat(filepath.Join(cwd, suggestions[j]))
+		iDir := iInfo != nil && iInfo.IsDir()
+		jDir := jInfo != nil && jInfo.IsDir()
+		if iDir != jDir {
+			return iDir
+		}
+		// Prefer shorter paths (closer to root)
+		iDepth := strings.Count(suggestions[i], "/")
+		jDepth := strings.Count(suggestions[j], "/")
+		if iDepth != jDepth {
+			return iDepth < jDepth
+		}
+		return strings.ToLower(suggestions[i]) < strings.ToLower(suggestions[j])
+	})
+
+	if len(suggestions) > 10 {
+		suggestions = suggestions[:10]
+	}
+
+	return suggestions
+}
+
+// extractFileMentions parses @filename mentions from input and returns clean text + file list
+func extractFileMentions(input string) (cleanInput string, files []string) {
+	// Match @word or @"path with spaces"
+	mentionRE := regexp.MustCompile(`@("([^"]+)"|([^\s]+))`)
+	matches := mentionRE.FindAllStringSubmatch(input, -1)
+
+	seen := make(map[string]bool)
+	for _, match := range matches {
+		var filename string
+		if match[2] != "" {
+			filename = match[2] // Quoted path
+		} else {
+			filename = match[3] // Unquoted path
+		}
+		if filename != "" && !seen[filename] {
+			// Check if file exists
+			if _, err := os.Stat(filename); err == nil {
+				files = append(files, filename)
+				seen[filename] = true
+			}
+		}
+	}
+
+	// Remove mentions from input for clean display
+	cleanInput = mentionRE.ReplaceAllString(input, "")
+	cleanInput = strings.TrimSpace(cleanInput)
+	// Collapse multiple spaces
+	cleanInput = regexp.MustCompile(`\s+`).ReplaceAllString(cleanInput, " ")
+
+	return cleanInput, files
+}
+
+// buildFileContext creates a context string with file contents
+func buildFileContext(files []string) string {
+	if len(files) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n# Attached Files\n")
+
+	for _, file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+
+		// Truncate large files
+		text := string(content)
+		lines := strings.Split(text, "\n")
+		if len(lines) > 500 {
+			text = strings.Join(lines[:500], "\n")
+			text += fmt.Sprintf("\n\n[... truncated, %d more lines]", len(lines)-500)
+		}
+
+		sb.WriteString(fmt.Sprintf("\n## %s\n```\n%s\n```\n", file, text))
+	}
+
+	return sb.String()
+}
+
+// getAtPosition finds the @ mention being typed at cursor position
+func getAtPosition(input string, cursorPos int) (prefix string, startPos int, found bool) {
+	if cursorPos > len(input) {
+		cursorPos = len(input)
+	}
+
+	// Look backwards from cursor for @
+	for i := cursorPos - 1; i >= 0; i-- {
+		ch := input[i]
+		if ch == '@' {
+			prefix = input[i+1 : cursorPos]
+			return prefix, i, true
+		}
+		if ch == ' ' || ch == '\n' || ch == '\t' {
+			return "", 0, false
+		}
+	}
+	return "", 0, false
+}
+
 type toolExecRecord struct {
 	Name   string
 	Args   string
@@ -85,9 +289,11 @@ type toolExecRecord struct {
 
 var inlineToolCallRE = regexp.MustCompile(`^\s*([a-zA-Z][a-zA-Z0-9_]*)\s*(\{.*\})\s*$`)
 
-type OpenModelSelectorMsg struct{}
-type CloseModelSelectorMsg struct{}
-type ModelSelectedMsg struct{ Model models.AIModel }
+type (
+	OpenModelSelectorMsg  struct{}
+	CloseModelSelectorMsg struct{}
+	ModelSelectedMsg      struct{ Model models.AIModel }
+)
 
 type responseMsg struct {
 	content          string
@@ -140,6 +346,14 @@ type model struct {
 	program            *tea.Program
 	contextTokens      int
 	appMode            models.AppMode
+
+	// File mention autocomplete
+	fileSuggestOpen     bool
+	fileSuggestions     []string
+	fileSuggestIdx      int
+	fileSuggestPrefix   string   // The partial text after @ being completed
+	attachedFiles       []string // Files attached via @mention for current message
+	pendingFiles        []string // Files detected in current input (for display)
 }
 
 func initialModel() model {
@@ -301,8 +515,52 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// File suggestion popup handling
+		if m.fileSuggestOpen {
+			switch msg.String() {
+			case "esc":
+				m.fileSuggestOpen = false
+				return m, nil
+			case "up", "ctrl+p":
+				if len(m.fileSuggestions) > 0 {
+					m.fileSuggestIdx--
+					if m.fileSuggestIdx < 0 {
+						m.fileSuggestIdx = len(m.fileSuggestions) - 1
+					}
+				}
+				return m, nil
+			case "down", "ctrl+n":
+				if len(m.fileSuggestions) > 0 {
+					m.fileSuggestIdx++
+					if m.fileSuggestIdx >= len(m.fileSuggestions) {
+						m.fileSuggestIdx = 0
+					}
+				}
+				return m, nil
+			case "tab", "enter":
+				if len(m.fileSuggestions) > 0 && m.fileSuggestIdx < len(m.fileSuggestions) {
+					selected := m.fileSuggestions[m.fileSuggestIdx]
+					// Replace the @prefix with @selected
+					val := m.textInput.Value()
+					cursorPos := m.textInput.Position()
+					prefix, startPos, found := getAtPosition(val, cursorPos)
+					if found {
+						newVal := val[:startPos] + "@" + selected + " " + val[startPos+1+len(prefix):]
+						m.textInput.SetValue(newVal)
+						m.textInput.SetCursor(startPos + len(selected) + 2)
+					}
+					m.fileSuggestOpen = false
+				}
+				return m, nil
+			}
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
+			if m.fileSuggestOpen {
+				m.fileSuggestOpen = false
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case tea.KeyCtrlN:
@@ -331,6 +589,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case tea.KeyEnter:
+			// If file suggestions are open, handle selection instead
+			if m.fileSuggestOpen && len(m.fileSuggestions) > 0 {
+				selected := m.fileSuggestions[m.fileSuggestIdx]
+				val := m.textInput.Value()
+				cursorPos := m.textInput.Position()
+				prefix, startPos, found := getAtPosition(val, cursorPos)
+				if found {
+					newVal := val[:startPos] + "@" + selected + " " + val[startPos+1+len(prefix):]
+					m.textInput.SetValue(newVal)
+					m.textInput.SetCursor(startPos + len(selected) + 2)
+				}
+				m.fileSuggestOpen = false
+				return m, nil
+			}
+
 			if m.loading {
 				return m, nil
 			}
@@ -344,11 +617,26 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			m.messages = append(m.messages, formatUserMessage(input, m.viewport.Width, len(m.messages) == 0))
+			// Extract file mentions and build context
+			cleanInput, files := extractFileMentions(input)
+			m.attachedFiles = files
+
+			// Display message shows clean input but indicates attached files
+			displayInput := cleanInput
+			if len(files) > 0 {
+				fileNames := make([]string, len(files))
+				for i, f := range files {
+					fileNames[i] = filepath.Base(f)
+				}
+				displayInput = fmt.Sprintf("%s\n📎 %s", cleanInput, strings.Join(fileNames, ", "))
+			}
+
+			m.messages = append(m.messages, formatUserMessage(displayInput, m.viewport.Width, len(m.messages) == 0))
 			if err := m.persistUserMessage(input); err != nil {
 				m.messages = append(m.messages, styles.ErrorStyle.Render(fmt.Sprintf("History error: %v", err)))
 			}
 			m.textInput.Reset()
+			m.fileSuggestOpen = false
 			m.loading = true
 			m.updateViewport()
 
@@ -407,13 +695,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
 		m.windowHeight = msg.Height
-		// Calculate chat width (left side) accounting for sidebar
-		chatWidth := msg.Width - sidebarWidth
-		if chatWidth > maxChatWidth {
-			chatWidth = maxChatWidth
+
+		var chatWidth int
+		if msg.Width < compactWidthThresh {
+			// Compact mode: full width, reserve 2 lines for bottom bar
+			chatWidth = msg.Width - 2
+			if chatWidth > maxChatWidth {
+				chatWidth = maxChatWidth
+			}
+			m.viewport.Width = chatWidth - 2
+			m.viewport.Height = msg.Height - 8 // Extra space for bottom bar
+		} else {
+			// Normal mode: sidebar on right
+			chatWidth = msg.Width - sidebarWidth
+			if chatWidth > maxChatWidth {
+				chatWidth = maxChatWidth
+			}
+			m.viewport.Width = chatWidth - 2
+			m.viewport.Height = msg.Height - 6
 		}
-		m.viewport.Width = chatWidth - 2
-		m.viewport.Height = msg.Height - 6
 		m.textInput.Width = chatWidth - 6
 		glamourStyle := "dark"
 		if !lipgloss.HasDarkBackground() {
@@ -434,6 +734,26 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if strings.Contains(val, "]11;rgb:") || strings.Contains(val, "1;rgb:") || strings.Contains(val, "[1;1R") {
 		m.textInput.Reset()
 	}
+
+	// Check for @ file mention trigger
+	val = m.textInput.Value()
+	cursorPos := m.textInput.Position()
+	if prefix, _, found := getAtPosition(val, cursorPos); found {
+		suggestions := getFileSuggestions(prefix)
+		if len(suggestions) > 0 {
+			m.fileSuggestions = suggestions
+			m.fileSuggestOpen = true
+			m.fileSuggestIdx = 0
+			m.fileSuggestPrefix = prefix
+		} else {
+			m.fileSuggestOpen = false
+		}
+	} else {
+		m.fileSuggestOpen = false
+	}
+
+	// Update pending files display (files currently mentioned in input)
+	_, m.pendingFiles = extractFileMentions(val)
 
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
@@ -942,6 +1262,10 @@ func (m *model) loadChatFromDB(chatID int64, modelID string) error {
 }
 
 func (m *model) sendMessage(input string) tea.Cmd {
+	// Capture attached files before returning the command
+	attachedFiles := m.attachedFiles
+	m.attachedFiles = nil // Clear for next message
+
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -954,12 +1278,22 @@ func (m *model) sendMessage(input string) tea.Cmd {
 			systemPrompt = chatSystemPrompt
 		}
 
+		// Extract clean input and build file context
+		cleanInput, _ := extractFileMentions(input)
+		fileContext := buildFileContext(attachedFiles)
+
+		// Combine user message with file context
+		userMessage := cleanInput
+		if fileContext != "" {
+			userMessage = cleanInput + fileContext
+		}
+
 		// Build history with system prompt
 		history := []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
 		}
 		history = append(history, m.history...)
-		history = append(history, openai.UserMessage(input))
+		history = append(history, openai.UserMessage(userMessage))
 
 		var totalPromptTokens int64
 		var totalCompletionTokens int64
@@ -1211,6 +1545,58 @@ func (m *model) renderHistorySelector() string {
 	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
 }
 
+func (m *model) isCompactMode() bool {
+	return m.windowWidth < compactWidthThresh
+}
+
+func (m *model) renderBottomBar() string {
+	modeBadge := "CHAT"
+	modeColor := "#81D4FA"
+	if m.appMode == models.ModeAgent {
+		modeBadge = "AGENT"
+		modeColor = "#CE93D8"
+	}
+	mode := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color(modeColor)).
+		Padding(0, 1).
+		Render(modeBadge)
+
+	modelName := truncateRunes(m.currentModel.Name, 20)
+	model := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#B39DDB")).
+		Render(modelName)
+
+	contextPct := 0
+	if m.contextTokens > 0 {
+		contextPct = int(float64(m.contextTokens) / float64(maxContextTokens) * 100)
+	}
+	ctx := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Render(fmt.Sprintf("ctx:%d%%", contextPct))
+
+	tokens := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Render(fmt.Sprintf("in:%d out:%d", m.inputTokens, m.outputTokens))
+
+	shortcuts := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#666666")).
+		Render("@:files ^A:mode ^B:models ^H:history ^N:new")
+
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#444444")).Render(" │ ")
+	bar := lipgloss.JoinHorizontal(lipgloss.Center, mode, sep, model, sep, ctx, sep, tokens, sep, shortcuts)
+
+	return lipgloss.NewStyle().
+		Width(m.windowWidth).
+		Align(lipgloss.Center).
+		BorderTop(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("#333333")).
+		Padding(0, 1).
+		Render(bar)
+}
+
 func (m *model) renderSidebar(height int) string {
 	w := sidebarWidth - 3 // Account for border and padding
 	divider := styles.SidebarDividerStyle.Render(strings.Repeat("─", w))
@@ -1293,6 +1679,7 @@ func (m *model) renderSidebar(height int) string {
 		key  string
 		desc string
 	}{
+		{"@", "files"},
 		{"^A", "mode"},
 		{"^B", "models"},
 		{"^H", "history"},
@@ -1311,29 +1698,142 @@ func (m *model) renderSidebar(height int) string {
 	return styles.SidebarStyle.Height(height).Width(sidebarWidth).Render(content)
 }
 
-func (m *model) View() string {
-	chatWidth := m.windowWidth - sidebarWidth
-	if chatWidth > maxChatWidth {
-		chatWidth = maxChatWidth
+func (m *model) renderPendingFiles() string {
+	if len(m.pendingFiles) == 0 {
+		return ""
 	}
-	inputBox := styles.InputBoxStyle.Width(chatWidth - 4).Render(m.textInput.View())
 
-	// Build chat area (left side) - centered
-	chatAreaWidth := m.windowWidth - sidebarWidth
-	chatContent := lipgloss.JoinVertical(lipgloss.Center,
-		styles.TitleStyle.Render("ARCANE AI"),
-		"",
-		m.viewport.View(),
-		"",
-		inputBox,
-	)
-	chatArea := lipgloss.PlaceHorizontal(chatAreaWidth, lipgloss.Center, chatContent)
+	chipStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#7C4DFF")).
+		Padding(0, 1).
+		MarginRight(1)
 
-	// Build sidebar (right side)
-	sidebar := m.renderSidebar(m.windowHeight - 2)
+	labelStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888"))
 
-	// Combine: centered chat + sidebar at far right
-	content := lipgloss.JoinHorizontal(lipgloss.Top, chatArea, sidebar)
+	var chips []string
+	for _, file := range m.pendingFiles {
+		chips = append(chips, chipStyle.Render("📄 "+filepath.Base(file)))
+	}
+
+	return labelStyle.Render("Attached: ") + strings.Join(chips, " ")
+}
+
+func (m *model) renderFileSuggestions() string {
+	if !m.fileSuggestOpen || len(m.fileSuggestions) == 0 {
+		return ""
+	}
+
+	suggestionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#E0E0E0")).
+		Padding(0, 1)
+
+	selectedStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#7C4DFF")).
+		Padding(0, 1)
+
+	var lines []string
+	header := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Italic(true).
+		Render("  Files (↑↓ to select, Tab/Enter to insert)")
+	lines = append(lines, header)
+
+	for i, suggestion := range m.fileSuggestions {
+		// Check if it's a directory
+		info, _ := os.Stat(suggestion)
+		display := suggestion
+		if info != nil && info.IsDir() {
+			display = suggestion + "/"
+		}
+
+		if i == m.fileSuggestIdx {
+			lines = append(lines, selectedStyle.Render("▸ "+display))
+		} else {
+			lines = append(lines, suggestionStyle.Render("  "+display))
+		}
+	}
+
+	popupStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#7C4DFF")).
+		Background(lipgloss.Color("#1E1E2E")).
+		Padding(0, 1)
+
+	return popupStyle.Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) View() string {
+	var content string
+
+	// Render file suggestions popup if open
+	fileSuggestPopup := m.renderFileSuggestions()
+	pendingFilesDisplay := m.renderPendingFiles()
+
+	if m.isCompactMode() {
+		// Compact mode: full-width chat with bottom bar
+		chatWidth := m.windowWidth - 2
+		if chatWidth > maxChatWidth {
+			chatWidth = maxChatWidth
+		}
+		inputBox := styles.InputBoxStyle.Width(chatWidth - 4).Render(m.textInput.View())
+
+		var inputSection string
+		var inputParts []string
+		if pendingFilesDisplay != "" {
+			inputParts = append(inputParts, pendingFilesDisplay)
+		}
+		if fileSuggestPopup != "" {
+			inputParts = append(inputParts, fileSuggestPopup)
+		}
+		inputParts = append(inputParts, inputBox)
+		inputSection = lipgloss.JoinVertical(lipgloss.Left, inputParts...)
+
+		chatContent := lipgloss.JoinVertical(lipgloss.Center,
+			styles.TitleStyle.Render("ARCANE AI"),
+			"",
+			m.viewport.View(),
+			"",
+			inputSection,
+		)
+		chatArea := lipgloss.PlaceHorizontal(m.windowWidth, lipgloss.Center, chatContent)
+		bottomBar := m.renderBottomBar()
+
+		content = lipgloss.JoinVertical(lipgloss.Left, chatArea, bottomBar)
+	} else {
+		// Normal mode: sidebar on right
+		chatWidth := m.windowWidth - sidebarWidth
+		if chatWidth > maxChatWidth {
+			chatWidth = maxChatWidth
+		}
+		inputBox := styles.InputBoxStyle.Width(chatWidth - 4).Render(m.textInput.View())
+
+		var inputSection string
+		var inputParts []string
+		if pendingFilesDisplay != "" {
+			inputParts = append(inputParts, pendingFilesDisplay)
+		}
+		if fileSuggestPopup != "" {
+			inputParts = append(inputParts, fileSuggestPopup)
+		}
+		inputParts = append(inputParts, inputBox)
+		inputSection = lipgloss.JoinVertical(lipgloss.Left, inputParts...)
+
+		chatAreaWidth := m.windowWidth - sidebarWidth
+		chatContent := lipgloss.JoinVertical(lipgloss.Center,
+			styles.TitleStyle.Render("ARCANE AI"),
+			"",
+			m.viewport.View(),
+			"",
+			inputSection,
+		)
+		chatArea := lipgloss.PlaceHorizontal(chatAreaWidth, lipgloss.Center, chatContent)
+		sidebar := m.renderSidebar(m.windowHeight - 2)
+
+		content = lipgloss.JoinHorizontal(lipgloss.Top, chatArea, sidebar)
+	}
 
 	if m.historyOpen {
 		modal := m.renderHistorySelector()
