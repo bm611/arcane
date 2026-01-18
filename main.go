@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,17 +31,16 @@ import (
 const (
 	maxChatWidth       = 100
 	modalWidth         = 60
-	sidebarWidth       = 30
 	compactWidthThresh = 100 // Width below which sidebar moves to bottom
 
 	historyListLimit = 50
 	historyPageSize  = 10
 
 	// Context window management
-	maxContextTokens    = 80000 // Target max tokens before compaction (lowered for earlier compaction)
-	recentMessagesKeep  = 6     // Number of recent messages to keep intact
-	charsPerToken       = 4     // Rough estimate for token calculation
-	truncatedResultSize = 500   // Max chars for truncated tool results (increased for better context)
+	defaultContextTokens = 80000 // Fallback if model context length is not available
+	recentMessagesKeep   = 6     // Number of recent messages to keep intact
+	charsPerToken        = 4     // Rough estimate for token calculation
+	truncatedResultSize  = 500   // Max chars for truncated tool results (increased for better context)
 
 	// Agent loop limit
 	maxToolIterations = 15 // Max tool call rounds before forcing a response
@@ -338,6 +338,7 @@ type model struct {
 	historyErr         error
 	historyPage        int
 	modelSelectorOpen  bool
+	shortcutsOpen      bool
 	currentModel       models.AIModel
 	selectedModelIndex int
 	executingTool      string
@@ -354,6 +355,62 @@ type model struct {
 	fileSuggestPrefix   string   // The partial text after @ being completed
 	attachedFiles       []string // Files attached via @mention for current message
 	pendingFiles        []string // Files detected in current input (for display)
+
+	// Working directory
+	workingDir string
+}
+
+// getMaxContextTokens returns the context limit for the current model
+func (m *model) getMaxContextTokens() int {
+	if m.currentModel.ContextLength > 0 {
+		return m.currentModel.ContextLength
+	}
+	return defaultContextTokens
+}
+
+// fetchModelContextLength fetches the context length for a model from OpenRouter API
+func fetchModelContextLength(apiKey, modelID string) int {
+	url := fmt.Sprintf("https://openrouter.ai/api/v1/models/%s", modelID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return 0
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return 0
+	}
+
+	var result struct {
+		Data struct {
+			ContextLength int `json:"context_length"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0
+	}
+	return result.Data.ContextLength
+}
+
+// fetchModelContextLengthMsg is sent when model context is fetched
+type fetchModelContextLengthMsg struct {
+	modelID       string
+	contextLength int
+}
+
+// fetchModelContextLengthCmd fetches context length in background
+func fetchModelContextLengthCmd(apiKey, modelID string) tea.Cmd {
+	return func() tea.Msg {
+		ctxLen := fetchModelContextLength(apiKey, modelID)
+		return fetchModelContextLengthMsg{modelID: modelID, contextLength: ctxLen}
+	}
 }
 
 func initialModel() model {
@@ -386,6 +443,8 @@ func initialModel() model {
 
 	dbConn, dbErr := db.OpenArcaneDB()
 
+	cwd, _ := os.Getwd()
+
 	return model{
 		textInput:          ti,
 		viewport:           vp,
@@ -407,11 +466,17 @@ func initialModel() model {
 		currentModel:       availableModels[0], // Gemini Flash as default
 		selectedModelIndex: 0,
 		appMode:            models.ModeChat, // Start in chat mode by default
+		workingDir:         cwd,
 	}
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.spinner.Tick)
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	return tea.Batch(
+		textinput.Blink,
+		m.spinner.Tick,
+		fetchModelContextLengthCmd(apiKey, m.currentModel.ID),
+	)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -510,6 +575,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				m.currentModel = availableModels[m.selectedModelIndex]
 				m.modelSelectorOpen = false
+				apiKey := os.Getenv("OPENROUTER_API_KEY")
+				return m, fetchModelContextLengthCmd(apiKey, m.currentModel.ID)
+			}
+			return m, nil
+		}
+
+		if m.shortcutsOpen {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc", "enter", "?", "ctrl+s":
+				m.shortcutsOpen = false
 				return m, nil
 			}
 			return m, nil
@@ -579,11 +656,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlB:
 			m.modelSelectorOpen = true
 			m.historyOpen = false
+			m.shortcutsOpen = false
+			return m, nil
+
+		case tea.KeyCtrlS: // Using Ctrl+S for shortcuts
+			m.shortcutsOpen = true
+			m.modelSelectorOpen = false
+			m.historyOpen = false
 			return m, nil
 
 		case tea.KeyCtrlH:
 			m.modelSelectorOpen = false
 			m.historyOpen = true
+			m.shortcutsOpen = false
 			m.historyPage = 0
 			m.refreshHistoryFromDB()
 			return m, nil
@@ -692,28 +777,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewport()
 		return m, nil
 
+	case fetchModelContextLengthMsg:
+		if msg.modelID == m.currentModel.ID && msg.contextLength > 0 {
+			m.currentModel.ContextLength = msg.contextLength
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
 		m.windowHeight = msg.Height
 
-		var chatWidth int
-		if msg.Width < compactWidthThresh {
-			// Compact mode: full width, reserve 2 lines for bottom bar
-			chatWidth = msg.Width - 2
-			if chatWidth > maxChatWidth {
-				chatWidth = maxChatWidth
-			}
-			m.viewport.Width = chatWidth - 2
-			m.viewport.Height = msg.Height - 8 // Extra space for bottom bar
-		} else {
-			// Normal mode: sidebar on right
-			chatWidth = msg.Width - sidebarWidth
-			if chatWidth > maxChatWidth {
-				chatWidth = maxChatWidth
-			}
-			m.viewport.Width = chatWidth - 2
-			m.viewport.Height = msg.Height - 6
+		// Full width mode (no sidebar)
+		// Reserve 2 lines for bottom bar + border
+		chatWidth := msg.Width - 2
+		if chatWidth > maxChatWidth {
+			chatWidth = maxChatWidth
 		}
+		m.viewport.Width = chatWidth - 2
+		m.viewport.Height = msg.Height - 8 // Extra space for bottom bar + input + header
+
 		m.textInput.Width = chatWidth - 6
 		glamourStyle := "dark"
 		if !lipgloss.HasDarkBackground() {
@@ -907,11 +989,11 @@ func truncateToolResult(toolName, result string) string {
 }
 
 // compactHistory reduces history size by truncating old tool results
-func compactHistory(history []openai.ChatCompletionMessageParamUnion) []openai.ChatCompletionMessageParamUnion {
+func compactHistory(history []openai.ChatCompletionMessageParamUnion, maxTokens int) []openai.ChatCompletionMessageParamUnion {
 	currentTokens := estimateHistoryTokens(history)
 
 	// If under limit, no compaction needed
-	if currentTokens < maxContextTokens {
+	if currentTokens < maxTokens {
 		return history
 	}
 
@@ -1332,7 +1414,7 @@ func (m *model) sendMessage(input string) tea.Cmd {
 			iteration++
 
 			// Compact history if approaching context limit
-			history = compactHistory(history)
+			history = compactHistory(history, m.getMaxContextTokens())
 
 			resp, err := m.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 				Model:    m.currentModel.ID,
@@ -1545,16 +1627,60 @@ func (m *model) renderHistorySelector() string {
 	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
 }
 
+func (m *model) renderShortcutsModal() string {
+	title := styles.ModalTitleStyle.Render("Keyboard Shortcuts")
+
+	shortcuts := []struct {
+		key  string
+		desc string
+	}{
+		{"Ctrl+C", "Quit Application"},
+		{"Ctrl+N", "New Chat Session"},
+		{"Ctrl+A", "Toggle Agent/Chat Mode"},
+		{"Ctrl+B", "Select AI Model"},
+		{"Ctrl+H", "View Chat History"},
+		{"Ctrl+S", "View Shortcuts (this menu)"},
+		{"@", "Mention File (in input)"},
+		{"Ctrl+L", "Clear Screen (standard)"},
+	}
+
+	var items []string
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFCC80")).
+		Bold(true).
+		Width(12)
+	
+	descStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#E0E0E0"))
+
+	for _, s := range shortcuts {
+		line := fmt.Sprintf("%s %s", keyStyle.Render(s.key), descStyle.Render(s.desc))
+		items = append(items, styles.ModalItemStyle.Render(line))
+	}
+
+	listContent := lipgloss.JoinVertical(lipgloss.Left, items...)
+	content := lipgloss.JoinVertical(lipgloss.Left, title, listContent)
+
+	hint := lipgloss.NewStyle().
+		Foreground(styles.HintColor).
+		Width(styles.ContentWidth).
+		PaddingTop(1).
+		Render("Esc/Enter: close")
+
+	return lipgloss.JoinVertical(lipgloss.Left, content, hint)
+}
+
 func (m *model) isCompactMode() bool {
 	return m.windowWidth < compactWidthThresh
 }
 
 func (m *model) renderBottomBar() string {
+	// 1. Mode Badge (Left)
 	modeBadge := "CHAT"
-	modeColor := "#81D4FA"
+	modeColor := "#81D4FA" // Light Blue
 	if m.appMode == models.ModeAgent {
 		modeBadge = "AGENT"
-		modeColor = "#CE93D8"
+		modeColor = "#CE93D8" // Light Purple
 	}
 	mode := lipgloss.NewStyle().
 		Bold(true).
@@ -1563,139 +1689,72 @@ func (m *model) renderBottomBar() string {
 		Padding(0, 1).
 		Render(modeBadge)
 
-	modelName := truncateRunes(m.currentModel.Name, 20)
+	// 2. Working Directory
+	cwdDisplay := m.workingDir
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(cwdDisplay, home) {
+		cwdDisplay = "~" + cwdDisplay[len(home):]
+	}
+	cwdDisplay = truncateRunes(cwdDisplay, 30)
+	cwd := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Render(cwdDisplay)
+
+	// 3. Model Name
+	modelName := truncateRunes(m.currentModel.Name, 25)
 	model := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#B39DDB")).
 		Render(modelName)
 
+	// 4. Context Window
+	maxCtx := m.getMaxContextTokens()
 	contextPct := 0
-	if m.contextTokens > 0 {
-		contextPct = int(float64(m.contextTokens) / float64(maxContextTokens) * 100)
+	if m.contextTokens > 0 && maxCtx > 0 {
+		contextPct = int(float64(m.contextTokens) / float64(maxCtx) * 100)
 	}
+	ctxColor := "#888888"
+	if contextPct > 80 {
+		ctxColor = "#EF9A9A" // Red
+	} else if contextPct > 60 {
+		ctxColor = "#FFF59D" // Yellow
+	}
+	
+	ctxText := fmt.Sprintf("%d%% (%dk/%dk)", contextPct, m.contextTokens/1000, maxCtx/1000)
 	ctx := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888888")).
-		Render(fmt.Sprintf("ctx:%d%%", contextPct))
+		Foreground(lipgloss.Color(ctxColor)).
+		Render(ctxText)
 
+	// 5. Token Usage
 	tokens := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888888")).
-		Render(fmt.Sprintf("in:%d out:%d", m.inputTokens, m.outputTokens))
-
-	shortcuts := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#666666")).
-		Render("@:files ^A:mode ^B:models ^H:history ^N:new")
+		Render(fmt.Sprintf("In:%d Out:%d", m.inputTokens, m.outputTokens))
 
-	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#444444")).Render(" │ ")
-	bar := lipgloss.JoinHorizontal(lipgloss.Center, mode, sep, model, sep, ctx, sep, tokens, sep, shortcuts)
+	// 6. Help Hint (Far Right)
+	help := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#555555")).
+		Render("Help: ^S")
+
+	// Spacer to push items apart
+	// We want: [Mode] [CWD] [Model] ...spacer... [Context] [Tokens] [Help]
+	
+	leftSide := lipgloss.JoinHorizontal(lipgloss.Center, mode, "  ", cwd, "  ", model)
+	rightSide := lipgloss.JoinHorizontal(lipgloss.Center, ctx, "  ", tokens, "  ", help)
+	
+	// Calculate available space for spacer
+	availableWidth := m.windowWidth - lipgloss.Width(leftSide) - lipgloss.Width(rightSide) - 2 // -2 for padding
+	if availableWidth < 0 {
+		availableWidth = 0
+	}
+	spacer := strings.Repeat(" ", availableWidth)
+
+	bar := lipgloss.JoinHorizontal(lipgloss.Center, leftSide, spacer, rightSide)
 
 	return lipgloss.NewStyle().
 		Width(m.windowWidth).
-		Align(lipgloss.Center).
 		BorderTop(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("#333333")).
 		Padding(0, 1).
 		Render(bar)
-}
-
-func (m *model) renderSidebar(height int) string {
-	w := sidebarWidth - 3 // Account for border and padding
-	divider := styles.SidebarDividerStyle.Render(strings.Repeat("─", w))
-
-	var sections []string
-
-	// Model section
-	providerColor := "#545454"
-	if c, ok := styles.ProviderColors[m.currentModel.Provider]; ok {
-		providerColor = c
-	}
-	modelSection := lipgloss.JoinVertical(lipgloss.Left,
-		styles.SidebarTitleStyle.Render("MODEL"),
-		styles.SidebarValueStyle.Render(truncateRunes(m.currentModel.Name, w)),
-		lipgloss.NewStyle().Foreground(lipgloss.Color(providerColor)).Italic(true).Render(m.currentModel.Provider),
-	)
-	sections = append(sections, modelSection, divider)
-
-	// Mode section
-	var modeBadge string
-	if m.appMode == models.ModeAgent {
-		modeBadge = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#CE93D8")).
-			Padding(0, 1).
-			Render("AGENT")
-	} else {
-		modeBadge = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#81D4FA")).
-			Padding(0, 1).
-			Render("CHAT")
-	}
-	modeSection := lipgloss.JoinVertical(lipgloss.Left,
-		styles.SidebarTitleStyle.Render("MODE"),
-		modeBadge,
-	)
-	sections = append(sections, modeSection, divider)
-
-	// Context section
-	contextPct := 0.0
-	if m.contextTokens > 0 {
-		contextPct = float64(m.contextTokens) / float64(maxContextTokens) * 100
-	}
-	barWidth := w - 2
-	filled := int(float64(barWidth) * contextPct / 100)
-	if filled > barWidth {
-		filled = barWidth
-	}
-	barColor := "#A5D6A7" // Green
-	if contextPct > 80 {
-		barColor = "#EF9A9A" // Red
-	} else if contextPct > 60 {
-		barColor = "#FFF59D" // Yellow
-	}
-	bar := lipgloss.NewStyle().Foreground(lipgloss.Color(barColor)).Render(strings.Repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#3a3a3a")).Render(strings.Repeat("░", barWidth-filled))
-	contextText := fmt.Sprintf("%dk/%dk", m.contextTokens/1000, maxContextTokens/1000)
-	contextSection := lipgloss.JoinVertical(lipgloss.Left,
-		styles.SidebarTitleStyle.Render("CONTEXT"),
-		styles.SidebarLabelStyle.Render(contextText),
-		bar,
-	)
-	sections = append(sections, contextSection, divider)
-
-	// Tokens section
-	inTokens := fmt.Sprintf("%d", m.inputTokens)
-	outTokens := fmt.Sprintf("%d", m.outputTokens)
-	tokenSection := lipgloss.JoinVertical(lipgloss.Left,
-		styles.SidebarTitleStyle.Render("TOKENS"),
-		styles.SidebarLabelStyle.Render("In:  ")+styles.InputTokenStyle.Render(inTokens),
-		styles.SidebarLabelStyle.Render("Out: ")+styles.OutputTokenStyle.Render(outTokens),
-	)
-	sections = append(sections, tokenSection, divider)
-
-	// Shortcuts section
-	shortcuts := []struct {
-		key  string
-		desc string
-	}{
-		{"@", "files"},
-		{"^A", "mode"},
-		{"^B", "models"},
-		{"^H", "history"},
-		{"^N", "new"},
-		{"^C", "quit"},
-	}
-	shortcutLines := []string{styles.SidebarTitleStyle.Render("SHORTCUTS")}
-	for _, s := range shortcuts {
-		line := styles.SidebarShortcutKeyStyle.Render(s.key) + " " + styles.SidebarShortcutDescStyle.Render(s.desc)
-		shortcutLines = append(shortcutLines, line)
-	}
-	shortcutSection := lipgloss.JoinVertical(lipgloss.Left, shortcutLines...)
-	sections = append(sections, shortcutSection)
-
-	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
-	return styles.SidebarStyle.Height(height).Width(sidebarWidth).Render(content)
 }
 
 func (m *model) renderPendingFiles() string {
@@ -1772,68 +1831,35 @@ func (m *model) View() string {
 	fileSuggestPopup := m.renderFileSuggestions()
 	pendingFilesDisplay := m.renderPendingFiles()
 
-	if m.isCompactMode() {
-		// Compact mode: full-width chat with bottom bar
-		chatWidth := m.windowWidth - 2
-		if chatWidth > maxChatWidth {
-			chatWidth = maxChatWidth
-		}
-		inputBox := styles.InputBoxStyle.Width(chatWidth - 4).Render(m.textInput.View())
-
-		var inputSection string
-		var inputParts []string
-		if pendingFilesDisplay != "" {
-			inputParts = append(inputParts, pendingFilesDisplay)
-		}
-		if fileSuggestPopup != "" {
-			inputParts = append(inputParts, fileSuggestPopup)
-		}
-		inputParts = append(inputParts, inputBox)
-		inputSection = lipgloss.JoinVertical(lipgloss.Left, inputParts...)
-
-		chatContent := lipgloss.JoinVertical(lipgloss.Center,
-			styles.TitleStyle.Render("ARCANE AI"),
-			"",
-			m.viewport.View(),
-			"",
-			inputSection,
-		)
-		chatArea := lipgloss.PlaceHorizontal(m.windowWidth, lipgloss.Center, chatContent)
-		bottomBar := m.renderBottomBar()
-
-		content = lipgloss.JoinVertical(lipgloss.Left, chatArea, bottomBar)
-	} else {
-		// Normal mode: sidebar on right
-		chatWidth := m.windowWidth - sidebarWidth
-		if chatWidth > maxChatWidth {
-			chatWidth = maxChatWidth
-		}
-		inputBox := styles.InputBoxStyle.Width(chatWidth - 4).Render(m.textInput.View())
-
-		var inputSection string
-		var inputParts []string
-		if pendingFilesDisplay != "" {
-			inputParts = append(inputParts, pendingFilesDisplay)
-		}
-		if fileSuggestPopup != "" {
-			inputParts = append(inputParts, fileSuggestPopup)
-		}
-		inputParts = append(inputParts, inputBox)
-		inputSection = lipgloss.JoinVertical(lipgloss.Left, inputParts...)
-
-		chatAreaWidth := m.windowWidth - sidebarWidth
-		chatContent := lipgloss.JoinVertical(lipgloss.Center,
-			styles.TitleStyle.Render("ARCANE AI"),
-			"",
-			m.viewport.View(),
-			"",
-			inputSection,
-		)
-		chatArea := lipgloss.PlaceHorizontal(chatAreaWidth, lipgloss.Center, chatContent)
-		sidebar := m.renderSidebar(m.windowHeight - 2)
-
-		content = lipgloss.JoinHorizontal(lipgloss.Top, chatArea, sidebar)
+	// Full-width chat with bottom bar
+	chatWidth := m.windowWidth - 2
+	if chatWidth > maxChatWidth {
+		chatWidth = maxChatWidth
 	}
+	inputBox := styles.InputBoxStyle.Width(chatWidth - 4).Render(m.textInput.View())
+
+	var inputSection string
+	var inputParts []string
+	if pendingFilesDisplay != "" {
+		inputParts = append(inputParts, pendingFilesDisplay)
+	}
+	if fileSuggestPopup != "" {
+		inputParts = append(inputParts, fileSuggestPopup)
+	}
+	inputParts = append(inputParts, inputBox)
+	inputSection = lipgloss.JoinVertical(lipgloss.Left, inputParts...)
+
+	chatContent := lipgloss.JoinVertical(lipgloss.Center,
+		styles.TitleStyle.Render("ARCANE AI"),
+		"",
+		m.viewport.View(),
+		"",
+		inputSection,
+	)
+	chatArea := lipgloss.PlaceHorizontal(m.windowWidth, lipgloss.Center, chatContent)
+	bottomBar := m.renderBottomBar()
+
+	content = lipgloss.JoinVertical(lipgloss.Left, chatArea, bottomBar)
 
 	if m.historyOpen {
 		modal := m.renderHistorySelector()
@@ -1852,6 +1878,21 @@ func (m *model) View() string {
 
 	if m.modelSelectorOpen {
 		modal := m.renderModelSelector()
+		modal = styles.ModalStyle.Width(modalWidth).Render(modal)
+
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("rgba(0,0,0,0.7)")).
+			Render(lipgloss.Place(
+				m.windowWidth,
+				m.windowHeight,
+				lipgloss.Center,
+				lipgloss.Center,
+				modal,
+			))
+	}
+
+	if m.shortcutsOpen {
+		modal := m.renderShortcutsModal()
 		modal = styles.ModalStyle.Width(modalWidth).Render(modal)
 
 		return lipgloss.NewStyle().

@@ -63,36 +63,6 @@ var (
 	ToolDetailStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#545454"))
 
-	SidebarStyle = lipgloss.NewStyle().
-			BorderLeft(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#545454")).
-			PaddingLeft(1).
-			PaddingRight(1).
-			PaddingTop(1)
-
-	SidebarTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#B39DDB")).
-				MarginBottom(0)
-
-	SidebarLabelStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#555555", Dark: "#AAAAAA"})
-
-	SidebarValueStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.AdaptiveColor{Light: "#1a1a2e", Dark: "#FFFFFF"})
-
-	SidebarDividerStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#3a3a3a"))
-
-	SidebarShortcutKeyStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FFCC80")).
-				Bold(true)
-
-	SidebarShortcutDescStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#888888"))
-
 	InputBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.ThickBorder()).
 			BorderForeground(lipgloss.Color("#B39DDB")).

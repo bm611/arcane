@@ -15,10 +15,11 @@ const (
 )
 
 type AIModel struct {
-	ID          string
-	Name        string
-	Provider    string
-	Description string
+	ID            string
+	Name          string
+	Provider      string
+	Description   string
+	ContextLength int // Maximum context window size in tokens
 }
 
 type ChatListItem struct {
