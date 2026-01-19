@@ -64,12 +64,12 @@ var (
 			Foreground(lipgloss.Color("#545454"))
 
 	InputBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.ThickBorder()).
+			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#B39DDB")).
 			Padding(0, 1)
 
 	WelcomeArtStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#B39DDB")).
+			Foreground(lipgloss.AdaptiveColor{Light: "#000000", Dark: "#FFFFFF"}).
 			Bold(true)
 
 	WelcomeSubtitleStyle = lipgloss.NewStyle().
