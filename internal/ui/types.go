@@ -13,14 +13,16 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
-const (
+var (
 	MaxChatWidth       = 100
 	ModalWidth         = 60
-	CompactWidthThresh = 100 // Width below which sidebar moves to bottom
+	CompactWidthThresh = 100
 
 	HistoryListLimit = 50
 	HistoryPageSize  = 10
+)
 
+const (
 	// Context window management
 	DefaultContextTokens = 80000 // Fallback if model context length is not available
 	RecentMessagesKeep   = 6     // Number of recent messages to keep intact
@@ -53,13 +55,14 @@ Guidelines:
 Working directory: %s`
 
 var AvailableModels = []models.AIModel{
-	{ID: "google/gemini-3-flash-preview", Name: "Gemini 3 Flash Preview", Provider: "Google", Description: "Fast multimodal model"},
-	{ID: "x-ai/grok-code-fast-1", Name: "Grok Code Fast 1", Provider: "xAI", Description: "Code-focused fast model"},
-	{ID: "deepseek/deepseek-v3.2", Name: "DeepSeek V3.2", Provider: "DeepSeek", Description: "Reasoning model"},
-	{ID: "x-ai/grok-4.1-fast", Name: "Grok 4.1 Fast", Provider: "xAI", Description: "General purpose fast model"},
-	{ID: "z-ai/glm-4.7", Name: "GLM 4.7", Provider: "Z.ai", Description: "Multilingual model"},
+	{ID: "google/gemini-3-flash-preview", Name: "Gemini 3 Flash", Provider: "Gemini", Description: "Fast multimodal model"},
+	{ID: "google/gemini-3-pro-preview", Name: "Gemini 3 Pro", Provider: "Gemini", Description: "Advanced multimodal reasoning"},
+	{ID: "x-ai/grok-4.1-fast", Name: "Grok 4.1 Fast", Provider: "Xai", Description: "General purpose fast model"},
+	{ID: "x-ai/grok-code-fast-1", Name: "Grok Code Fast 1", Provider: "Xai", Description: "Code-focused fast model"},
+	{ID: "deepseek/deepseek-v3.2", Name: "DeepSeek V3.2", Provider: "Deepseek", Description: "Reasoning model"},
 	{ID: "minimax/minimax-m2.1", Name: "MiniMax M2.1", Provider: "MiniMax", Description: "Chat model"},
 	{ID: "perplexity/sonar-pro", Name: "Perplexity Sonar Pro", Provider: "Perplexity", Description: "Search-optimized model"},
+	{ID: "z-ai/glm-4.7", Name: "GLM 4.7", Provider: "Z.ai", Description: "Multilingual model"},
 	{ID: "openai/gpt-oss-120b:free", Name: "GPT-OSS 120B Free", Provider: "OpenAI", Description: "Open-source large language model"},
 }
 
@@ -125,6 +128,7 @@ type Model struct {
 	ShortcutsOpen      bool
 	CurrentModel       models.AIModel
 	SelectedModelIndex int
+	ModelViewport      viewport.Model
 	ExecutingTool      string
 	ToolArguments      string
 	ToolActions        []models.ToolAction // Completed tool actions for current response

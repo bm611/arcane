@@ -2,7 +2,7 @@ package styles
 
 import "github.com/charmbracelet/lipgloss"
 
-const (
+var (
 	ContentWidth = 54
 )
 
@@ -91,11 +91,15 @@ var (
 			Padding(0, 1).
 			Width(ContentWidth)
 
+	ModalHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				PaddingLeft(1).
+				Width(ContentWidth)
+
 	ModalSelectedStyle = lipgloss.NewStyle().
 				Padding(0, 1).
-				Background(lipgloss.Color("#2D2D44")).
-				Foreground(lipgloss.Color("#FFFFFF")).
-				Width(ContentWidth)
+				Background(lipgloss.Color("#5C5C7A")).
+				Foreground(lipgloss.Color("#FFFFFF"))
 
 	ModelNameStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -117,9 +121,9 @@ var (
 )
 
 var ProviderColors = map[string]string{
-	"Google":     "#CE93D8",
-	"xAI":        "#FFCC80",
-	"DeepSeek":   "#80CBC4",
+	"Gemini":     "#CE93D8",
+	"Xai":        "#FFCC80",
+	"Deepseek":   "#80CBC4",
 	"MiniMax":    "#81D4FA",
 	"Perplexity": "#EF9A9A",
 	"Z.ai":       "#A5D6A7",

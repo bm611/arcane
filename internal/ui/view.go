@@ -11,51 +11,59 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-func (m *Model) RenderModelSelector() string {
-	title := styles.ModalTitleStyle.Render("Select AI Model")
-
+func (m *Model) UpdateModelSelectorContent() {
 	var items []string
+	var lastProvider string
 	for i, mdl := range AvailableModels {
+		if mdl.Provider != lastProvider {
+			if lastProvider != "" {
+				items = append(items, "")
+			}
+			providerColor := "#545454"
+			if c, ok := styles.ProviderColors[mdl.Provider]; ok {
+				providerColor = c
+			}
+			header := styles.ModalHeaderStyle.Copy().
+				Foreground(lipgloss.Color(providerColor)).
+				Render(mdl.Provider)
+			items = append(items, header)
+			lastProvider = mdl.Provider
+		}
+
 		isSelected := i == m.SelectedModelIndex
 		isCurrent := m.CurrentModel.ID == mdl.ID
 
-		// Cursor / Selection Indicator
-		cursor := "  "
-		if isSelected {
-			cursor = "> "
-		}
-
-		// Status Indicator (Active Model)
-		status := " "
-		if isCurrent {
-			status = "●"
-		}
-
-		// Provider color
-		providerColor := "#545454"
-		if c, ok := styles.ProviderColors[mdl.Provider]; ok {
-			providerColor = c
-		}
-
 		// Build row content as plain text first
-		row1 := fmt.Sprintf("%s%s %s  %s", cursor, status, mdl.Name, mdl.Provider)
-		row2 := fmt.Sprintf("     %s", mdl.Description)
-		itemContent := fmt.Sprintf("%s\n%s", row1, row2)
+		// We format it simply as "ModelName" (left aligned)
+		// The active status "●" will be appended or prepended minimally if needed,
+		// or we can bold the active one.
+		// User asked for "left align both model and provider name".
+		// Provider headers are already left aligned.
+		// Let's just show the model name.
+
+		displayName := mdl.Name
+		if isCurrent {
+			displayName = "● " + displayName
+		} else {
+			displayName = "  " + displayName
+		}
 
 		// Apply the appropriate style (selected vs normal)
 		var styledItem string
 		if isSelected {
-			styledItem = styles.ModalSelectedStyle.Render(itemContent)
+			// Highlight the whole line by ensuring width fills content
+			styledItem = styles.ModalSelectedStyle.Copy().
+				Width(styles.ContentWidth).
+				Render(displayName)
 		} else {
-			// For non-selected, apply provider color to the provider text
-			row1Styled := fmt.Sprintf("%s%s %s  %s",
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Render(cursor),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#90CAF9")).Render(status),
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1a1a2e", Dark: "#FFFFFF"}).Render(mdl.Name),
-				lipgloss.NewStyle().Foreground(lipgloss.Color(providerColor)).Render(mdl.Provider),
-			)
-			row2Styled := fmt.Sprintf("     %s", lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Render(mdl.Description))
-			styledItem = styles.ModalItemStyle.Render(fmt.Sprintf("%s\n%s", row1Styled, row2Styled))
+			// Normal style
+			style := styles.ModalItemStyle.Copy().Width(styles.ContentWidth)
+			if isCurrent {
+				style = style.Foreground(lipgloss.Color("#90CAF9")) // Highlight active model text
+			} else {
+				style = style.Foreground(lipgloss.AdaptiveColor{Light: "#1a1a2e", Dark: "#FFFFFF"})
+			}
+			styledItem = style.Render(displayName)
 		}
 
 		items = append(items, styledItem)
@@ -63,9 +71,17 @@ func (m *Model) RenderModelSelector() string {
 
 	// Join all items vertically
 	listContent := lipgloss.JoinVertical(lipgloss.Left, items...)
+	m.ModelViewport.SetContent(listContent)
+}
+
+func (m *Model) RenderModelSelector() string {
+	title := styles.ModalTitleStyle.Render("Select AI Model")
+	
+	// Ensure content is up to date (this might be better called in Update, but good for safety)
+	// m.UpdateModelSelectorContent() // Commented out to avoid side effects in Render, call explicitly in Update
 
 	// Wrap everything in the modal content
-	content := lipgloss.JoinVertical(lipgloss.Left, title, listContent)
+	content := lipgloss.JoinVertical(lipgloss.Left, title, m.ModelViewport.View())
 
 	hint := lipgloss.NewStyle().
 		Foreground(styles.HintColor).

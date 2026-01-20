@@ -55,9 +55,12 @@ func InitialModel() Model {
 
 	cwd, _ := os.Getwd()
 
+	mvp := viewport.New(ModalWidth-4, 15)
+
 	return Model{
 		TextInput:          ti,
 		Viewport:           vp,
+		ModelViewport:      mvp,
 		Spinner:            sp,
 		Client:             client,
 		DB:                 dbConn,

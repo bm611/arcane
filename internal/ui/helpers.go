@@ -489,6 +489,46 @@ func RelativeTime(t time.Time) string {
 	return fmt.Sprintf("%d weeks ago", weeks)
 }
 
+func (m *Model) SyncModelViewportScroll() {
+	// Height of each model item (1 line + padding)
+	const itemHeight = 1
+	// Header height (1 line + padding)
+	const headerHeight = 1
+
+	var currentY int
+	var lastProvider string
+	for i, mdl := range AvailableModels {
+		itemStartY := currentY
+
+		if mdl.Provider != lastProvider {
+			if lastProvider != "" {
+				currentY += 1 // Spacer
+				itemStartY += 1
+			}
+			// Header is here, so this block starts at currentY
+			itemStartY = currentY
+			currentY += headerHeight
+			lastProvider = mdl.Provider
+		} else {
+			// No header, item starts here
+			itemStartY = currentY
+		}
+
+		if i == m.SelectedModelIndex {
+			// If item bottom is below viewport, scroll down
+			if currentY+itemHeight > m.ModelViewport.YOffset+m.ModelViewport.Height {
+				m.ModelViewport.SetYOffset(currentY + itemHeight - m.ModelViewport.Height)
+			}
+			// If item top (or header top) is above viewport, scroll up
+			if itemStartY < m.ModelViewport.YOffset {
+				m.ModelViewport.SetYOffset(itemStartY)
+			}
+			break
+		}
+		currentY += itemHeight
+	}
+}
+
 func FindModelByID(id string) (models.AIModel, int, bool) {
 	for i, mdl := range AvailableModels {
 		if mdl.ID == id {

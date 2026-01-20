@@ -105,12 +105,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.SelectedModelIndex < 0 {
 					m.SelectedModelIndex = len(AvailableModels) - 1
 				}
+				m.SyncModelViewportScroll()
+				m.UpdateModelSelectorContent()
 				return m, nil
 			case "down", "j":
 				m.SelectedModelIndex++
 				if m.SelectedModelIndex >= len(AvailableModels) {
 					m.SelectedModelIndex = 0
 				}
+				m.SyncModelViewportScroll()
+				m.UpdateModelSelectorContent()
 				return m, nil
 			case "enter":
 				m.CurrentModel = AvailableModels[m.SelectedModelIndex]
@@ -196,6 +200,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ModelSelectorOpen = true
 			m.HistoryOpen = false
 			m.ShortcutsOpen = false
+			m.UpdateModelSelectorContent() // Initial render
+			m.SyncModelViewportScroll()    // Initial scroll sync
 			return m, nil
 
 		case tea.KeyCtrlS: // Using Ctrl+S for shortcuts
@@ -319,6 +325,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.WindowWidth = msg.Width
 		m.WindowHeight = msg.Height
+
+		// Update modal dimensions
+		ModalWidth = msg.Width - 10
+		if ModalWidth > 60 {
+			ModalWidth = 60
+		}
+		if ModalWidth < 30 {
+			ModalWidth = 30
+		}
+		styles.ContentWidth = ModalWidth - 6
+
+		// Update Viewport sizes
+		m.ModelViewport.Width = styles.ContentWidth
+		m.ModelViewport.Height = msg.Height - 15
+		if m.ModelViewport.Height > 20 {
+			m.ModelViewport.Height = 20
+		}
+		if m.ModelViewport.Height < 5 {
+			m.ModelViewport.Height = 5
+		}
 
 		// Full width mode (no sidebar)
 		// Reserve 2 lines for bottom bar + border
