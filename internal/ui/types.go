@@ -6,7 +6,7 @@ import (
 	"regexp"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -104,7 +104,7 @@ type ToolResultMsg struct {
 type Model struct {
 	Viewport           viewport.Model
 	Messages           []string
-	TextInput          textinput.Model
+	TextInput          textarea.Model
 	Spinner            spinner.Model
 	Client             openai.Client
 	DB                 *sql.DB
@@ -137,12 +137,12 @@ type Model struct {
 	AppMode            models.AppMode
 
 	// File mention autocomplete
-	FileSuggestOpen     bool
-	FileSuggestions     []string
-	FileSuggestIdx      int
-	FileSuggestPrefix   string   // The partial text after @ being completed
-	AttachedFiles       []string // Files attached via @mention for current message
-	PendingFiles        []string // Files detected in current input (for display)
+	FileSuggestOpen   bool
+	FileSuggestions   []string
+	FileSuggestIdx    int
+	FileSuggestPrefix string   // The partial text after @ being completed
+	AttachedFiles     []string // Files attached via @mention for current message
+	PendingFiles      []string // Files detected in current input (for display)
 
 	// Working directory
 	WorkingDir string

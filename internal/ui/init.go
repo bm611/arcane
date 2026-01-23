@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -37,12 +37,20 @@ func InitialModel() Model {
 		option.WithHeader("X-Title", "Arcane CLI"),
 	)
 
-	ti := textinput.New()
+	ti := textarea.New()
 	ti.Placeholder = "Type a message..."
 	ti.Prompt = "❯ "
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Bold(true)
-	ti.CharLimit = 1000
-	ti.Width = 80
+	ti.ShowLineNumbers = false
+	ti.CharLimit = 0
+	ti.MaxHeight = 6
+	ti.SetHeight(2)
+	ti.SetWidth(80)
+	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Bold(true)
+	ti.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Bold(true)
+	ti.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#545454"))
+	ti.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#545454"))
+	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	ti.Focus()
 
 	sp := spinner.New()
@@ -86,7 +94,7 @@ func InitialModel() Model {
 func (m *Model) Init() tea.Cmd {
 	// apiKey := os.Getenv("OPENROUTER_API_KEY")
 	return tea.Batch(
-		textinput.Blink,
+		m.TextInput.Cursor.BlinkCmd(),
 		m.Spinner.Tick,
 		// fetchModelContextLengthCmd(apiKey, m.currentModel.ID),
 	)

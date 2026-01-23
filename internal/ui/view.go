@@ -76,7 +76,7 @@ func (m *Model) UpdateModelSelectorContent() {
 
 func (m *Model) RenderModelSelector() string {
 	title := styles.ModalTitleStyle.Render("Select AI Model")
-	
+
 	// Ensure content is up to date (this might be better called in Update, but good for safety)
 	// m.UpdateModelSelectorContent() // Commented out to avoid side effects in Render, call explicitly in Update
 
@@ -154,6 +154,7 @@ func (m *Model) RenderShortcutsModal() string {
 		{"Ctrl+B", "Select AI Model"},
 		{"Ctrl+H", "View Chat History"},
 		{"Ctrl+S", "View Shortcuts (this menu)"},
+		{"Shift+Enter/Ctrl+J", "New line in input"},
 		{"@", "Mention File (in input)"},
 		{"Ctrl+L", "Clear Screen (standard)"},
 	}
@@ -222,12 +223,6 @@ func (m *Model) RenderBottomBar() string {
 		Foreground(lipgloss.Color("#888888")).
 		Render(cwdDisplay)
 
-	// 3. Model Name
-	modelName := TruncateRunes(m.CurrentModel.Name, 25)
-	model := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#B39DDB")).
-		Render(modelName)
-
 	// 4. Context Window
 	maxCtx := m.GetMaxContextTokens()
 	contextPct := 0
@@ -257,9 +252,9 @@ func (m *Model) RenderBottomBar() string {
 		Render("Help: ^S")
 
 	// Spacer to push items apart
-	// We want: [Mode] [CWD] [Model] ...spacer... [Context] [Tokens] [Help]
+	// We want: [Mode] [CWD] ...spacer... [Context] [Tokens] [Help]
 
-	leftSide := lipgloss.JoinHorizontal(lipgloss.Center, mode, "  ", cwd, "  ", model)
+	leftSide := lipgloss.JoinHorizontal(lipgloss.Center, mode, "  ", cwd)
 	rightSide := lipgloss.JoinHorizontal(lipgloss.Center, ctx, "  ", tokens, "  ", help)
 
 	// Calculate available space for spacer
@@ -422,8 +417,13 @@ func (m *Model) View() string {
 	inputWidth := m.WindowWidth - 4
 	inputBox := styles.InputBoxStyle.Width(inputWidth).Render(m.TextInput.View())
 
+	// Model name displayed above input, right-aligned
+	modelNameLine := lipgloss.PlaceHorizontal(m.WindowWidth-4, lipgloss.Right,
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Render(m.CurrentModel.Name))
+
 	var inputSection string
 	var inputParts []string
+	inputParts = append(inputParts, modelNameLine)
 	if pendingFilesDisplay != "" {
 		inputParts = append(inputParts, pendingFilesDisplay)
 	}

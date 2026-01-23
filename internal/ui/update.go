@@ -135,6 +135,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if isNewlineShortcut(msg) {
+			m.TextInput.InsertString("\n")
+			m.FileSuggestOpen = false
+			m.updateInputLayout()
+			return m, nil
+		}
+
 		// File suggestion popup handling
 		if m.FileSuggestOpen {
 			switch msg.String() {
@@ -162,12 +169,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selected := m.FileSuggestions[m.FileSuggestIdx]
 					// Replace the @prefix with @selected
 					val := m.TextInput.Value()
-					cursorPos := m.TextInput.Position()
+					cursorPos := TextareaCursorIndex(m.TextInput)
 					prefix, startPos, found := GetAtPosition(val, cursorPos)
 					if found {
 						newVal := val[:startPos] + "@" + selected + " " + val[startPos+1+len(prefix):]
+						newCursorIndex := startPos + len(selected) + 2
 						m.TextInput.SetValue(newVal)
-						m.TextInput.SetCursor(startPos + len(selected) + 2)
+						row, col := TextareaCursorFromIndex(newVal, newCursorIndex)
+						SetTextareaCursor(&m.TextInput, row, col)
 					}
 					m.FileSuggestOpen = false
 				}
@@ -223,12 +232,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.FileSuggestOpen && len(m.FileSuggestions) > 0 {
 				selected := m.FileSuggestions[m.FileSuggestIdx]
 				val := m.TextInput.Value()
-				cursorPos := m.TextInput.Position()
+				cursorPos := TextareaCursorIndex(m.TextInput)
 				prefix, startPos, found := GetAtPosition(val, cursorPos)
 				if found {
 					newVal := val[:startPos] + "@" + selected + " " + val[startPos+1+len(prefix):]
+					newCursorIndex := startPos + len(selected) + 2
 					m.TextInput.SetValue(newVal)
-					m.TextInput.SetCursor(startPos + len(selected) + 2)
+					row, col := TextareaCursorFromIndex(newVal, newCursorIndex)
+					SetTextareaCursor(&m.TextInput, row, col)
 				}
 				m.FileSuggestOpen = false
 				return m, nil
@@ -266,6 +277,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Messages = append(m.Messages, styles.ErrorStyle.Render(fmt.Sprintf("History error: %v", err)))
 			}
 			m.TextInput.Reset()
+			m.updateInputLayout()
 			m.FileSuggestOpen = false
 			m.Loading = true
 			m.UpdateViewport()
@@ -350,9 +362,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reserve 2 lines for bottom bar + border
 		chatWidth := msg.Width - 2
 		m.Viewport.Width = chatWidth - 2
-		m.Viewport.Height = msg.Height - 8 // Extra space for bottom bar + input + header
 
-		m.TextInput.Width = msg.Width - 6 // Expand input to full window width minus padding
+		m.updateInputLayout()
 		glamourStyle := "dark"
 		if !lipgloss.HasDarkBackground() {
 			glamourStyle = "light"
@@ -366,6 +377,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	m.TextInput, tiCmd = m.TextInput.Update(msg)
+	m.updateInputLayout()
 
 	// Filter out terminal background color queries and cursor reference codes that leak into the input
 	val := m.TextInput.Value()
@@ -375,7 +387,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Check for @ file mention trigger
 	val = m.TextInput.Value()
-	cursorPos := m.TextInput.Position()
+	cursorPos := TextareaCursorIndex(m.TextInput)
 	if prefix, _, found := GetAtPosition(val, cursorPos); found {
 		suggestions := GetFileSuggestions(prefix)
 		if len(suggestions) > 0 {
@@ -398,6 +410,51 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
+func isNewlineShortcut(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "shift+enter", "shift+return", "ctrl+j", "ctrl+enter", "alt+enter":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Model) updateInputLayout() {
+	if m.WindowWidth == 0 || m.WindowHeight == 0 {
+		return
+	}
+
+	inputWidth := m.WindowWidth - 6
+	if inputWidth < 20 {
+		inputWidth = 20
+	}
+	contentWidth := inputWidth - 2
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+
+	maxInputHeight := 6
+	lineCount := WrappedLineCount(m.TextInput.Value(), contentWidth)
+	if lineCount < 1 {
+		lineCount = 1
+	}
+	if lineCount > maxInputHeight {
+		lineCount = maxInputHeight
+	}
+
+	m.TextInput.MaxHeight = maxInputHeight
+	m.TextInput.SetWidth(inputWidth)
+	m.TextInput.SetHeight(lineCount)
+
+	inputBoxHeight := m.TextInput.Height() + 2
+	reserved := inputBoxHeight + 5
+	viewportHeight := m.WindowHeight - reserved
+	if viewportHeight < 5 {
+		viewportHeight = 5
+	}
+	m.Viewport.Height = viewportHeight
+}
+
 func (m *Model) ResetSession() {
 	m.Messages = []string{}
 	m.History = []openai.ChatCompletionMessageParamUnion{}
@@ -410,6 +467,7 @@ func (m *Model) ResetSession() {
 	m.Viewport.SetContent(GetWelcomeScreen(m.Viewport.Width, m.Viewport.Height))
 	m.Viewport.GotoTop()
 	m.TextInput.Reset()
+	m.updateInputLayout()
 }
 
 func (m *Model) RefreshHistoryFromDB() {

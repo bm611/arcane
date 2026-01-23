@@ -11,7 +11,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/mattn/go-runewidth"
 	"github.com/openai/openai-go/v3"
 )
 
@@ -214,6 +217,136 @@ func GetAtPosition(input string, cursorPos int) (prefix string, startPos int, fo
 		}
 	}
 	return "", 0, false
+}
+
+func TextareaCursorIndex(t textarea.Model) int {
+	value := t.Value()
+	row := t.Line()
+	li := t.LineInfo()
+	col := li.StartColumn + li.ColumnOffset
+	return cursorIndexFromRowCol(value, row, col)
+}
+
+func TextareaCursorFromIndex(value string, index int) (row int, col int) {
+	if index < 0 {
+		index = 0
+	}
+	if index > len(value) {
+		index = len(value)
+	}
+
+	lines := strings.Split(value, "\n")
+	pos := 0
+	for i, line := range lines {
+		lineLen := len(line)
+		if index <= pos+lineLen {
+			row = i
+			col = runeIndexForByteIndex(line, index-pos)
+			return row, col
+		}
+		pos += lineLen + 1
+	}
+
+	if len(lines) == 0 {
+		return 0, 0
+	}
+	row = len(lines) - 1
+	col = utf8.RuneCountInString(lines[row])
+	return row, col
+}
+
+func SetTextareaCursor(t *textarea.Model, row int, col int) {
+	lineCount := t.LineCount()
+	if lineCount == 0 {
+		t.SetCursor(0)
+		return
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= lineCount {
+		row = lineCount - 1
+	}
+
+	for i := 0; i < 10000 && t.Line() > 0; i++ {
+		t.CursorUp()
+	}
+	for i := 0; i < 10000 && t.Line() < row; i++ {
+		t.CursorDown()
+	}
+	for i := 0; i < 10000 && t.Line() > row; i++ {
+		t.CursorUp()
+	}
+
+	t.SetCursor(col)
+}
+
+func cursorIndexFromRowCol(value string, row int, col int) int {
+	lines := strings.Split(value, "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(lines) {
+		row = len(lines) - 1
+	}
+
+	index := 0
+	for i := 0; i < row; i++ {
+		index += len(lines[i]) + 1
+	}
+	index += byteIndexForRuneColumn(lines[row], col)
+	return index
+}
+
+func byteIndexForRuneColumn(s string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	count := 0
+	for i := range s {
+		if count >= col {
+			return i
+		}
+		count++
+	}
+	return len(s)
+}
+
+func runeIndexForByteIndex(s string, idx int) int {
+	if idx <= 0 {
+		return 0
+	}
+	count := 0
+	for i := range s {
+		if i >= idx {
+			return count
+		}
+		count++
+	}
+	return count
+}
+
+func WrappedLineCount(value string, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) == 0 {
+		return 1
+	}
+	count := 0
+	for _, line := range lines {
+		w := runewidth.StringWidth(line)
+		if w == 0 {
+			count++
+			continue
+		}
+		count += (w-1)/width + 1
+	}
+	return count
 }
 
 // EstimateTokens provides a rough token count estimate based on character count
