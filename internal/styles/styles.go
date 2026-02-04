@@ -98,6 +98,7 @@ var (
 
 	ModalSelectedStyle = lipgloss.NewStyle().
 				Padding(0, 1).
+				Width(ContentWidth).
 				Background(lipgloss.Color("#5C5C7A")).
 				Foreground(lipgloss.Color("#FFFFFF"))
 

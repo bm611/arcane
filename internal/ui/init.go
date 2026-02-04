@@ -102,7 +102,7 @@ func (m *Model) Init() tea.Cmd {
 
 func NewProgram() *tea.Program {
 	m := InitialModel()
-	p := tea.NewProgram(&m, tea.WithAltScreen())
+	p := tea.NewProgram(&m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	m.Program = p
 	return p
 }

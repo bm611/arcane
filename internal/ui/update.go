@@ -27,6 +27,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if len(m.Messages) == 0 && !m.Loading {
+			// Welcome screen is centered
+			// Art is ~64 chars wide, ~14 lines high
+			// Height: m.WindowHeight
+			// Width: m.WindowWidth
+			midX := m.WindowWidth / 2
+			midY := m.WindowHeight / 2
+			artWidth := 64
+			artHeight := 14
+
+			startX := midX - (artWidth / 2)
+			startY := midY - (artHeight / 2) - 2 // Offset for subtitle
+
+			if msg.X >= startX && msg.X <= startX+artWidth &&
+				msg.Y >= startY && msg.Y <= startY+artHeight {
+				if !m.MouseHoverArt {
+					m.MouseHoverArt = true
+					m.UpdateViewport()
+				}
+			} else {
+				if m.MouseHoverArt {
+					m.MouseHoverArt = false
+					m.UpdateViewport()
+				}
+			}
+		}
+		return m, nil
+
 	case spinner.TickMsg:
 		m.Spinner, spCmd = m.Spinner.Update(msg)
 		if m.Loading {
@@ -464,7 +493,7 @@ func (m *Model) ResetSession() {
 	m.ContextTokens = 0
 	m.HistoryOpen = false
 	m.HistoryErr = nil
-	m.Viewport.SetContent(GetWelcomeScreen(m.Viewport.Width, m.Viewport.Height))
+	m.Viewport.SetContent(GetWelcomeScreen(m.Viewport.Width, m.Viewport.Height, m.MouseHoverArt))
 	m.Viewport.GotoTop()
 	m.TextInput.Reset()
 	m.updateInputLayout()

@@ -146,4 +146,7 @@ type Model struct {
 
 	// Working directory
 	WorkingDir string
+
+	// Mouse interaction
+	MouseHoverArt bool
 }

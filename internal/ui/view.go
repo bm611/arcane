@@ -118,10 +118,31 @@ func (m *Model) RenderHistorySelector() string {
 			if prompt == "" {
 				prompt = "(no prompt)"
 			}
-			availableWidth := styles.ContentWidth - 2 - len(cursor) - 1 - len(timeStr)
-			prompt = TruncateRunes(prompt, availableWidth)
 
-			itemContent := fmt.Sprintf("%s%s %s", cursor, prompt, lipgloss.NewStyle().Foreground(styles.HintColor).Render(timeStr))
+			// We have styles.ContentWidth (54)
+			// Styles have Padding(0, 1), so effective inner width is 52
+			innerWidth := styles.ContentWidth - 2
+
+			timeStyle := lipgloss.NewStyle().Foreground(styles.HintColor)
+			if isSelected {
+				timeStyle = timeStyle.Foreground(lipgloss.Color("#DDDDDD"))
+			}
+			styledTime := timeStyle.Render(timeStr)
+			timeWidth := lipgloss.Width(styledTime)
+			cursorWidth := lipgloss.Width(cursor)
+
+			maxPromptWidth := innerWidth - cursorWidth - timeWidth - 2 // -2 for minimum gap
+			prompt = TruncateRunes(prompt, maxPromptWidth)
+
+			// Calculate spacer to right-align the time
+			currentWidth := cursorWidth + lipgloss.Width(prompt) + timeWidth
+			spacer := ""
+			if innerWidth > currentWidth {
+				spacer = strings.Repeat(" ", innerWidth-currentWidth)
+			}
+
+			itemContent := cursor + prompt + spacer + styledTime
+
 			if isSelected {
 				items = append(items, styles.ModalSelectedStyle.Render(itemContent))
 			} else {
@@ -342,25 +363,30 @@ func (m *Model) RenderFileSuggestions() string {
 	return popupStyle.Render(strings.Join(lines, "\n"))
 }
 
-func GetWelcomeScreen(width, height int) string {
+func GetWelcomeScreen(width, height int, hover bool) string {
 	art := `
- ╭──────────────────────────────────────────────────────────────╮
- │                                                              │
- │    ▄▄▄       ██▀███   ▄████▄   ▄▄▄       ███▄    █  ▓█████   │
- │   ▒████▄    ▓██ ▒ ██▒▒██▀ ▀█  ▒████▄     ██ ▀█   █  ▓█   ▀   │
- │   ▒██  ▀█▄  ▓██ ░▄█ ▒▒▓█    ▄ ▒██  ▀█▄  ▓██  ▀█ ██▒ ▒███     │
- │   ░██▄▄▄▄██ ▒██▀▀█▄  ▒▓▓▄ ▄██▒░██▄▄▄▄██ ▓██▒  ▐▌██▒ ▒▓█  ▄   │
- │    ▓█   ▓██▒░██▓ ▒██▒▒ ▓███▀ ░ ▓█   ▓██▒▒██░   ▓██░ ░▒████▒  │
- │    ▒▒   ▓▒█░░ ▒▓ ░▒▓░░ ░▒ ▒  ░ ▒▒   ▓▒█░░ ▒░   ▒ ▒  ░░ ▒░ ░  │
- │     ▒   ▒▒ ░  ░▒ ░ ▒░  ░  ▒     ▒   ▒▒ ░░ ░░   ░ ▒░  ░ ░  ░  │
- │     ░   ▒     ░░   ░ ░          ░   ▒      ░   ░ ░     ░     │
- │         ░  ░   ░     ░ ░            ░  ░         ░     ░  ░  │
- │                                                              │
- ╰──────────────────────────────────────────────────────────────╯
+    ╔═══════════════════════════════════════════════════════════╗
+    ║                                                           ║
+    ║     █████╗ ██████╗  ██████╗ █████╗ ███╗   ██╗███████╗     ║
+    ║    ██╔══██╗██╔══██╗██╔════╝██╔══██╗████╗  ██║██╔════╝     ║
+    ║    ███████║██████╔╝██║     ███████║██╔██╗ ██║█████╗       ║
+    ║    ██╔══██║██╔══██╗██║     ██╔══██║██║╚██╗██║██╔══╝       ║
+    ║    ██║  ██║██║  ██║╚██████╗██║  ██║██║ ╚████║███████╗     ║
+    ║    ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝     ║
+    ║                                                           ║
+    ╚═══════════════════════════════════════════════════════════╝
 `
 	subtitle := "“Code is not just logic, it is the architecture of imagination.”"
 
-	styledArt := styles.WelcomeArtStyle.Render(art)
+	artStyle := styles.WelcomeArtStyle.Copy()
+	if hover {
+		artStyle = artStyle.
+			Foreground(lipgloss.Color("#B39DDB")).
+			Bold(true).
+			Italic(true)
+	}
+
+	styledArt := artStyle.Render(art)
 	styledSubtitle := styles.WelcomeSubtitleStyle.Italic(true).Render(subtitle)
 
 	content := lipgloss.JoinVertical(lipgloss.Center, styledArt, "", styledSubtitle)
@@ -370,7 +396,7 @@ func GetWelcomeScreen(width, height int) string {
 
 func (m *Model) UpdateViewport() {
 	if len(m.Messages) == 0 && !m.Loading {
-		m.Viewport.SetContent(GetWelcomeScreen(m.Viewport.Width, m.Viewport.Height))
+		m.Viewport.SetContent(GetWelcomeScreen(m.Viewport.Width, m.Viewport.Height, m.MouseHoverArt))
 		return
 	}
 
