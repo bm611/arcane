@@ -427,7 +427,6 @@ func (m *Model) UpdateViewport() {
 		}
 	}
 	m.Viewport.SetContent(content)
-	m.Viewport.GotoBottom()
 }
 
 func (m *Model) View() string {

@@ -54,7 +54,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return m, nil
+		// Let mouse events fall through to viewports for scrolling support
 
 	case spinner.TickMsg:
 		m.Spinner, spCmd = m.Spinner.Update(msg)
@@ -310,14 +310,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.FileSuggestOpen = false
 			m.Loading = true
 			m.UpdateViewport()
+			m.Viewport.GotoBottom()
 
 			return m, tea.Batch(m.SendMessage(input), m.Spinner.Tick)
+		}
+
+		switch msg.String() {
+		case "alt+up":
+			m.Viewport.LineUp(3)
+			return m, nil
+		case "alt+down":
+			m.Viewport.LineDown(3)
+			return m, nil
 		}
 
 	case ToolCallMsg:
 		m.ExecutingTool = msg.Name
 		m.ToolArguments = msg.Arguments
 		m.UpdateViewport()
+		m.Viewport.GotoBottom()
 		return m, nil
 
 	case ToolResultMsg:
@@ -329,6 +340,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Summary: msg.Summary,
 		})
 		m.UpdateViewport()
+		m.Viewport.GotoBottom()
 		return m, nil
 
 	case ResponseMsg:
@@ -354,6 +366,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Messages = append(m.Messages, styles.ErrorStyle.Render(fmt.Sprintf("History error: %v", err)))
 		}
 		m.UpdateViewport()
+		m.Viewport.GotoBottom()
 		return m, nil
 
 	case ErrMsg:
@@ -361,6 +374,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Err = msg
 		m.Messages = append(m.Messages, styles.ErrorStyle.Render(fmt.Sprintf("Error: %v", msg)))
 		m.UpdateViewport()
+		m.Viewport.GotoBottom()
 		return m, nil
 
 	case tea.WindowSizeMsg:
@@ -436,7 +450,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	m.Viewport, vpCmd = m.Viewport.Update(msg)
 
-	return m, tea.Batch(tiCmd, vpCmd)
+	var mvpCmd tea.Cmd
+	if m.ModelSelectorOpen {
+		m.ModelViewport, mvpCmd = m.ModelViewport.Update(msg)
+	}
+
+	return m, tea.Batch(tiCmd, vpCmd, mvpCmd)
 }
 
 func isNewlineShortcut(msg tea.KeyMsg) bool {
