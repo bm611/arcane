@@ -35,8 +35,8 @@ This project is a Terminal User Interface (TUI) chat application built with Go, 
 
 - **Model**: Default model is `gemini-2.5-flash` (defined as `modelName` in `main.go`).
 - **TUI Components**:
-    - `textinput`: Used for user input.
-    - `viewport`: Used for displaying chat history with scrolling.
+  - `textinput`: Used for user input.
+  - `viewport`: Used for displaying chat history with scrolling.
 - **Styling**: Styles for User and AI responses are defined globally in `main.go`.
 
 ## ⚠️ Gotchas
