@@ -59,9 +59,9 @@ func (m *Model) UpdateModelSelectorContent() {
 			// Normal style
 			style := styles.ModalItemStyle.Copy().Width(styles.ContentWidth)
 			if isCurrent {
-				style = style.Foreground(lipgloss.Color("#90CAF9")) // Highlight active model text
+				style = style.Foreground(lipgloss.Color(styles.Cyan)) // Highlight active model text
 			} else {
-				style = style.Foreground(lipgloss.AdaptiveColor{Light: "#1a1a2e", Dark: "#FFFFFF"})
+				style = style.Foreground(lipgloss.AdaptiveColor{Light: "#1a1a2e", Dark: styles.TextPrimary})
 			}
 			styledItem = style.Render(displayName)
 		}
@@ -125,7 +125,7 @@ func (m *Model) RenderHistorySelector() string {
 
 			timeStyle := lipgloss.NewStyle().Foreground(styles.HintColor)
 			if isSelected {
-				timeStyle = timeStyle.Foreground(lipgloss.Color("#DDDDDD"))
+				timeStyle = timeStyle.Foreground(lipgloss.Color(styles.Cyan))
 			}
 			styledTime := timeStyle.Render(timeStr)
 			timeWidth := lipgloss.Width(styledTime)
@@ -182,12 +182,12 @@ func (m *Model) RenderShortcutsModal() string {
 
 	var items []string
 	keyStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFCC80")).
+		Foreground(lipgloss.Color(styles.Amber)).
 		Bold(true).
 		Width(12)
 
 	descStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#E0E0E0"))
+		Foreground(lipgloss.Color(styles.TextSecondary))
 
 	for _, s := range shortcuts {
 		line := fmt.Sprintf("%s %s", keyStyle.Render(s.key), descStyle.Render(s.desc))
@@ -209,27 +209,14 @@ func (m *Model) RenderShortcutsModal() string {
 func (m *Model) RenderBottomBar() string {
 	// 1. Mode Badge (Left)
 	modeBadge := "CHAT"
-	// modeColor := "#81D4FA" // Light Blue
-	// if m.AppMode == models.ModeAgent {
-	// 	modeBadge = "AGENT"
-	// 	modeColor = "#CE93D8" // Light Purple
-	// }
-	// mode := lipgloss.NewStyle().
-	// 	Bold(true).
-	// 	Foreground(lipgloss.Color("#FFFFFF")).
-	// 	Background(lipgloss.Color(modeColor)).
-	// 	Padding(0, 1).
-	// 	Render(modeBadge)
-	// Temporarily commenting out color logic to simplify porting
-	// Re-enabling with logic
-	modeColor := "#81D4FA"
+	modeColor := styles.Rose
 	if m.AppMode == 1 { // models.ModeAgent
 		modeBadge = "AGENT"
-		modeColor = "#CE93D8"
+		modeColor = styles.Pink
 	}
 	mode := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#FFFFFF")).
+		Foreground(lipgloss.Color("#0E1525")).
 		Background(lipgloss.Color(modeColor)).
 		Padding(0, 1).
 		Render(modeBadge)
@@ -241,7 +228,7 @@ func (m *Model) RenderBottomBar() string {
 	}
 	cwdDisplay = TruncateRunes(cwdDisplay, 30)
 	cwd := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888888")).
+		Foreground(lipgloss.Color(styles.TextMuted)).
 		Render(cwdDisplay)
 
 	// 4. Context Window
@@ -250,11 +237,11 @@ func (m *Model) RenderBottomBar() string {
 	if m.ContextTokens > 0 && maxCtx > 0 {
 		contextPct = int(float64(m.ContextTokens) / float64(maxCtx) * 100)
 	}
-	ctxColor := "#888888"
+	ctxColor := styles.TextMuted
 	if contextPct > 80 {
-		ctxColor = "#EF9A9A" // Red
+		ctxColor = styles.ErrRed
 	} else if contextPct > 60 {
-		ctxColor = "#FFF59D" // Yellow
+		ctxColor = styles.ErrAmber
 	}
 
 	ctxText := fmt.Sprintf("%d%% (%dk/%dk)", contextPct, m.ContextTokens/1000, maxCtx/1000)
@@ -264,13 +251,13 @@ func (m *Model) RenderBottomBar() string {
 
 	// 5. Token Usage
 	tokens := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#666666")).
-		Render(fmt.Sprintf("In:%d Out:%d", m.InputTokens, m.OutputTokens))
+		Foreground(lipgloss.Color(styles.TextDim)).
+		Render(fmt.Sprintf("in:%d out:%d", m.InputTokens, m.OutputTokens))
 
 	// 6. Help Hint (Far Right)
 	help := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#555555")).
-		Render("Help: ^S")
+		Foreground(lipgloss.Color("#334155")).
+		Render("^S help")
 
 	// Spacer to push items apart
 	// We want: [Mode] [CWD] ...spacer... [Context] [Tokens] [Help]
@@ -291,7 +278,7 @@ func (m *Model) RenderBottomBar() string {
 		Width(m.WindowWidth).
 		BorderTop(true).
 		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("#333333")).
+		BorderForeground(lipgloss.Color(styles.BorderDark)).
 		Padding(0, 1).
 		Render(bar)
 }
@@ -302,13 +289,13 @@ func (m *Model) RenderPendingFiles() string {
 	}
 
 	chipStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Background(lipgloss.Color("#7C4DFF")).
+		Foreground(lipgloss.Color("#F1F5F9")).
+		Background(lipgloss.Color(styles.Violet)).
 		Padding(0, 1).
 		MarginRight(1)
 
 	labelStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888888"))
+		Foreground(lipgloss.Color(styles.TextMuted))
 
 	var chips []string
 	for _, file := range m.PendingFiles {
@@ -324,19 +311,19 @@ func (m *Model) RenderFileSuggestions() string {
 	}
 
 	suggestionStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#E0E0E0")).
+		Foreground(lipgloss.Color(styles.TextSecondary)).
 		Padding(0, 1)
 
 	selectedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Background(lipgloss.Color("#7C4DFF")).
+		Foreground(lipgloss.Color("#F1F5F9")).
+		Background(lipgloss.Color(styles.Violet)).
 		Padding(0, 1)
 
 	var lines []string
 	header := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888888")).
+		Foreground(lipgloss.Color(styles.TextMuted)).
 		Italic(true).
-		Render("  Files (↑↓ to select, Tab/Enter to insert)")
+		Render("  files (↑↓ select, Tab/Enter insert)")
 	lines = append(lines, header)
 
 	for i, suggestion := range m.FileSuggestions {
@@ -356,8 +343,8 @@ func (m *Model) RenderFileSuggestions() string {
 
 	popupStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7C4DFF")).
-		Background(lipgloss.Color("#1E1E2E")).
+		BorderForeground(lipgloss.Color(styles.Rose)).
+		Background(lipgloss.Color(styles.BgDeep)).
 		Padding(0, 1)
 
 	return popupStyle.Render(strings.Join(lines, "\n"))
@@ -381,7 +368,7 @@ func GetWelcomeScreen(width, height int, hover bool) string {
 	artStyle := styles.WelcomeArtStyle.Copy()
 	if hover {
 		artStyle = artStyle.
-			Foreground(lipgloss.Color("#B39DDB")).
+			Foreground(lipgloss.Color(styles.Violet)).
 			Bold(true).
 			Italic(true)
 	}
@@ -402,24 +389,34 @@ func (m *Model) UpdateViewport() {
 
 	content := strings.Join(m.Messages, "\n\n")
 	if m.Loading {
-		statusText := " Generating..."
-		if m.ExecutingTool != "" {
-			statusText = fmt.Sprintf(" %s...", m.ExecutingTool)
+		var loadingMsg string
+
+		if m.StreamingContent != "" {
+			// Show the partial streaming response as it arrives
+			label := styles.AiLabelStyle.Render("ARCANE")
+			partial := styles.AiMsgStyle.Render(m.StreamingContent + "▋")
+			loadingMsg = fmt.Sprintf("%s\n%s", label, partial)
+		} else {
+			statusText := " Generating..."
+			if m.ExecutingTool != "" {
+				statusText = fmt.Sprintf(" %s...", m.ExecutingTool)
+			}
+
+			// Build loading message with completed tool actions
+			var loadingParts []string
+			loadingParts = append(loadingParts, styles.AiLabelStyle.Render("ARCANE"))
+
+			// Show completed tool actions
+			if len(m.ToolActions) > 0 {
+				loadingParts = append(loadingParts, FormatToolActions(m.ToolActions))
+			}
+
+			// Show current status (spinner + status text)
+			loadingParts = append(loadingParts, fmt.Sprintf("%s%s", m.Spinner.View(), statusText))
+
+			loadingMsg = strings.Join(loadingParts, "\n")
 		}
 
-		// Build loading message with completed tool actions
-		var loadingParts []string
-		loadingParts = append(loadingParts, styles.AiLabelStyle.Render("ARCANE"))
-
-		// Show completed tool actions
-		if len(m.ToolActions) > 0 {
-			loadingParts = append(loadingParts, FormatToolActions(m.ToolActions))
-		}
-
-		// Show current status (spinner + status text)
-		loadingParts = append(loadingParts, fmt.Sprintf("%s%s", m.Spinner.View(), statusText))
-
-		loadingMsg := strings.Join(loadingParts, "\n")
 		if len(m.Messages) > 0 {
 			content = content + "\n\n" + loadingMsg
 		} else {
@@ -444,7 +441,7 @@ func (m *Model) View() string {
 
 	// Model name displayed above input, right-aligned
 	modelNameLine := lipgloss.PlaceHorizontal(m.WindowWidth-4, lipgloss.Right,
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#B39DDB")).Render(m.CurrentModel.Name))
+		lipgloss.NewStyle().Foreground(lipgloss.Color(styles.Cyan)).Italic(true).Render("⬡ "+m.CurrentModel.Name))
 
 	var inputSection string
 	var inputParts []string

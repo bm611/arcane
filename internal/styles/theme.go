@@ -10,23 +10,23 @@ type Theme struct {
 	Accent    lipgloss.Color
 
 	// Background colors
-	BgBase    lipgloss.Color
-	BgSurface lipgloss.Color
+	BgBase     lipgloss.Color
+	BgSurface  lipgloss.Color
 	BgElevated lipgloss.Color
 
 	// Text colors
-	TextPrimary   lipgloss.Color
-	TextSecondary lipgloss.Color
-	TextMuted     lipgloss.Color
+	TextPrimary_   lipgloss.Color
+	TextSecondary_ lipgloss.Color
+	TextMuted_     lipgloss.Color
 
 	// Semantic colors
-	Success lipgloss.Color
-	Warning lipgloss.Color
-	Error   lipgloss.Color
-	Info    lipgloss.Color
+	Success_ lipgloss.Color
+	Warning  lipgloss.Color
+	Error_   lipgloss.Color
+	Info     lipgloss.Color
 
 	// UI element colors
-	Border lipgloss.Color
+	Border  lipgloss.Color
 	Divider lipgloss.Color
 
 	// Mode-specific
@@ -34,56 +34,56 @@ type Theme struct {
 	ModeAgent lipgloss.Color
 }
 
-// DarkTheme is the dark mode color scheme
+// DarkTheme — Noir Rose palette
 var DarkTheme = Theme{
-	Primary:      lipgloss.Color("#818CF8"),    // Indigo 400
-	Secondary:    lipgloss.Color("#22D3EE"),    // Cyan 400
-	Accent:       lipgloss.Color("#F472B6"),    // Pink 400
+	Primary:   lipgloss.Color(Rose),
+	Secondary: lipgloss.Color(Cyan),
+	Accent:    lipgloss.Color(Violet),
 
-	BgBase:       lipgloss.Color("#0B0B0F"),    // Deep black
-	BgSurface:    lipgloss.Color("#141419"),    // Slightly lighter
-	BgElevated:   lipgloss.Color("#1E1E2A"),    // Elevated surfaces
+	BgBase:     lipgloss.Color("#080C14"),
+	BgSurface:  lipgloss.Color("#0D1117"),
+	BgElevated: lipgloss.Color(BgDeep),
 
-	TextPrimary:   lipgloss.Color("#F1F5F9"),   // Slate 100
-	TextSecondary: lipgloss.Color("#94A3B8"),   // Slate 400
-	TextMuted:     lipgloss.Color("#64748B"),   // Slate 500
+	TextPrimary_:   lipgloss.Color(TextPrimary),
+	TextSecondary_: lipgloss.Color(TextSecondary),
+	TextMuted_:     lipgloss.Color(TextMuted),
 
-	Success: lipgloss.Color("#34D399"), // Emerald 400
-	Warning: lipgloss.Color("#FBBF24"), // Amber 400
-	Error:   lipgloss.Color("#FB7185"), // Rose 400
-	Info:    lipgloss.Color("#60A5FA"), // Blue 400
+	Success_: lipgloss.Color(Success),
+	Warning:  lipgloss.Color(Amber),
+	Error_:   lipgloss.Color(ErrRed),
+	Info:     lipgloss.Color(Cyan),
 
-	Border:  lipgloss.Color("#27272A"),  // Zinc 800
-	Divider: lipgloss.Color("#1F2937"),  // Gray 800
+	Border:  lipgloss.Color(BorderDark),
+	Divider: lipgloss.Color("#111827"),
 
-	ModeChat:  lipgloss.Color("#818CF8"), // Indigo
-	ModeAgent: lipgloss.Color("#A78BFA"), // Purple
+	ModeChat:  lipgloss.Color(Rose),
+	ModeAgent: lipgloss.Color(Pink),
 }
 
 // LightTheme is the light mode color scheme
 var LightTheme = Theme{
-	Primary:      lipgloss.Color("#4F46E5"),    // Indigo 600
-	Secondary:    lipgloss.Color("#0891B2"),    // Cyan 600
-	Accent:       lipgloss.Color("#DB2777"),    // Pink 600
+	Primary:   lipgloss.Color("#E11D48"),
+	Secondary: lipgloss.Color("#0891B2"),
+	Accent:    lipgloss.Color("#7C3AED"),
 
-	BgBase:       lipgloss.Color("#FAFAFA"),    // Near white
-	BgSurface:    lipgloss.Color("#FFFFFF"),    // White
-	BgElevated:   lipgloss.Color("#F4F4F5"),    // Zinc 100
+	BgBase:     lipgloss.Color("#FAFAFA"),
+	BgSurface:  lipgloss.Color("#FFFFFF"),
+	BgElevated: lipgloss.Color("#F4F4F5"),
 
-	TextPrimary:   lipgloss.Color("#18181B"),   // Zinc 900
-	TextSecondary: lipgloss.Color("#52525B"),   // Zinc 600
-	TextMuted:     lipgloss.Color("#A1A1AA"),   // Zinc 400
+	TextPrimary_:   lipgloss.Color("#0F172A"),
+	TextSecondary_: lipgloss.Color("#475569"),
+	TextMuted_:     lipgloss.Color("#94A3B8"),
 
-	Success: lipgloss.Color("#10B981"), // Emerald 500
-	Warning: lipgloss.Color("#F59E0B"), // Amber 500
-	Error:   lipgloss.Color("#EF4444"), // Red 500
-	Info:    lipgloss.Color("#3B82F6"), // Blue 500
+	Success_: lipgloss.Color("#10B981"),
+	Warning:  lipgloss.Color("#F59E0B"),
+	Error_:   lipgloss.Color("#EF4444"),
+	Info:     lipgloss.Color("#0891B2"),
 
-	Border:  lipgloss.Color("#E4E4E7"),  // Zinc 200
-	Divider: lipgloss.Color("#F4F4F5"),  // Zinc 100
+	Border:  lipgloss.Color("#E2E8F0"),
+	Divider: lipgloss.Color("#F1F5F9"),
 
-	ModeChat:  lipgloss.Color("#4F46E5"), // Indigo
-	ModeAgent: lipgloss.Color("#7C3AED"), // Purple
+	ModeChat:  lipgloss.Color("#E11D48"),
+	ModeAgent: lipgloss.Color("#7C3AED"),
 }
 
 // CurrentTheme holds the active theme (set at runtime based on terminal)
@@ -96,26 +96,26 @@ type Adaptive = lipgloss.AdaptiveColor
 var (
 	FgPrimary   = Adaptive{Light: string(LightTheme.Primary), Dark: string(DarkTheme.Primary)}
 	FgSecondary = Adaptive{Light: string(LightTheme.Secondary), Dark: string(DarkTheme.Secondary)}
-	FgMuted     = Adaptive{Light: string(LightTheme.TextMuted), Dark: string(DarkTheme.TextMuted)}
-	FgError     = Adaptive{Light: string(LightTheme.Error), Dark: string(DarkTheme.Error)}
-	FgSuccess   = Adaptive{Light: string(LightTheme.Success), Dark: string(DarkTheme.Success)}
+	FgMuted     = Adaptive{Light: string(LightTheme.TextMuted_), Dark: string(DarkTheme.TextMuted_)}
+	FgError     = Adaptive{Light: string(LightTheme.Error_), Dark: string(DarkTheme.Error_)}
+	FgSuccess   = Adaptive{Light: string(LightTheme.Success_), Dark: string(DarkTheme.Success_)}
 	FgWarning   = Adaptive{Light: string(LightTheme.Warning), Dark: string(DarkTheme.Warning)}
-	Accent      = Adaptive{Light: string(LightTheme.Accent), Dark: string(DarkTheme.Accent)}
+	AccentColor = Adaptive{Light: string(LightTheme.Accent), Dark: string(DarkTheme.Accent)}
 
-	BgSurface   = Adaptive{Light: string(LightTheme.BgSurface), Dark: string(DarkTheme.BgSurface)}
-	BgElevated  = Adaptive{Light: string(LightTheme.BgElevated), Dark: string(DarkTheme.BgElevated)}
-	BorderColor = Adaptive{Light: string(LightTheme.Border), Dark: string(DarkTheme.Border)}
+	BgSurfaceColor = Adaptive{Light: string(LightTheme.BgSurface), Dark: string(DarkTheme.BgSurface)}
+	BgElevatedColor = Adaptive{Light: string(LightTheme.BgElevated), Dark: string(DarkTheme.BgElevated)}
+	BorderColor     = Adaptive{Light: string(LightTheme.Border), Dark: string(DarkTheme.Border)}
 )
 
 // ProviderColorMap returns the color for each AI provider
 var ProviderColorMap = map[string]lipgloss.Color{
-	"Gemini":     lipgloss.Color("#A78BFA"), // Purple
-	"Xai":        lipgloss.Color("#F472B6"), // Pink
-	"Deepseek":   lipgloss.Color("#22D3EE"), // Cyan
-	"MiniMax":    lipgloss.Color("#60A5FA"), // Blue
-	"Perplexity": lipgloss.Color("#FBBF24"), // Amber
-	"Z.ai":       lipgloss.Color("#34D399"), // Emerald
-	"OpenAI":     lipgloss.Color("#10B981"), // Green
+	"Gemini":     lipgloss.Color("#A78BFA"),
+	"Xai":        lipgloss.Color(Pink),
+	"Deepseek":   lipgloss.Color(Cyan),
+	"MiniMax":    lipgloss.Color("#60A5FA"),
+	"Perplexity": lipgloss.Color(Amber),
+	"Z.ai":       lipgloss.Color(Success),
+	"OpenAI":     lipgloss.Color(Success),
 }
 
 // GetProviderColor returns the color for a provider

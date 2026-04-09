@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -214,9 +215,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyCtrlC:
+			if m.Loading && m.CancelFn != nil {
+				m.CancelFn()
+			}
+			return m, tea.Quit
+
+		case tea.KeyEsc:
 			if m.FileSuggestOpen {
 				m.FileSuggestOpen = false
+				return m, nil
+			}
+			if m.Loading && m.CancelFn != nil {
+				m.CancelFn()
 				return m, nil
 			}
 			return m, tea.Quit
@@ -309,10 +320,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateInputLayout()
 			m.FileSuggestOpen = false
 			m.Loading = true
+			m.StreamingContent = ""
 			m.UpdateViewport()
 			m.Viewport.GotoBottom()
 
-			return m, tea.Batch(m.SendMessage(input), m.Spinner.Tick)
+			ctx, cancel := context.WithCancel(context.Background())
+			m.CancelFn = cancel
+			return m, tea.Batch(m.SendMessage(ctx, input), m.Spinner.Tick)
 		}
 
 		switch msg.String() {
@@ -323,6 +337,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Viewport.LineDown(3)
 			return m, nil
 		}
+
+	case StreamChunkMsg:
+		m.StreamingContent += msg.Delta
+		m.UpdateViewport()
+		m.Viewport.GotoBottom()
+		return m, nil
+
+	case CancelledMsg:
+		m.Loading = false
+		m.StreamingContent = ""
+		m.ExecutingTool = ""
+		m.ToolArguments = ""
+		m.ToolActions = nil
+		m.CancelFn = nil
+		m.UpdateViewport()
+		return m, nil
 
 	case ToolCallMsg:
 		m.ExecutingTool = msg.Name
@@ -345,6 +375,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ResponseMsg:
 		m.Loading = false
+		m.StreamingContent = ""
+		if m.CancelFn != nil {
+			m.CancelFn()
+			m.CancelFn = nil
+		}
 		m.InputTokens += msg.PromptTokens
 		m.OutputTokens += msg.CompletionTokens
 		m.History = msg.History
@@ -371,6 +406,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ErrMsg:
 		m.Loading = false
+		m.StreamingContent = ""
+		if m.CancelFn != nil {
+			m.CancelFn()
+			m.CancelFn = nil
+		}
 		m.Err = msg
 		m.Messages = append(m.Messages, styles.ErrorStyle.Render(fmt.Sprintf("Error: %v", msg)))
 		m.UpdateViewport()
@@ -504,12 +544,20 @@ func (m *Model) updateInputLayout() {
 }
 
 func (m *Model) ResetSession() {
+	if m.CancelFn != nil {
+		m.CancelFn()
+		m.CancelFn = nil
+	}
 	m.Messages = []string{}
 	m.History = []openai.ChatCompletionMessageParamUnion{}
 	m.CurrentChatID = 0
 	m.InputTokens = 0
 	m.OutputTokens = 0
 	m.ContextTokens = 0
+	m.Loading = false
+	m.StreamingContent = ""
+	m.ExecutingTool = ""
+	m.ToolActions = nil
 	m.HistoryOpen = false
 	m.HistoryErr = nil
 	m.Viewport.SetContent(GetWelcomeScreen(m.Viewport.Width, m.Viewport.Height, m.MouseHoverArt))
@@ -633,14 +681,12 @@ func (m *Model) LoadChatFromDB(chatID int64, modelID string) error {
 	return nil
 }
 
-func (m *Model) SendMessage(input string) tea.Cmd {
+func (m *Model) SendMessage(ctx context.Context, input string) tea.Cmd {
 	// Capture attached files before returning the command
 	attachedFiles := m.AttachedFiles
 	m.AttachedFiles = nil // Clear for next message
 
 	return func() tea.Msg {
-		ctx := context.Background()
-
 		// Build system prompt based on mode
 		var systemPrompt string
 		if m.AppMode == models.ModeAgent {
@@ -670,38 +716,53 @@ func (m *Model) SendMessage(input string) tea.Cmd {
 		var totalPromptTokens int64
 		var totalCompletionTokens int64
 
-		// Chat mode: single API call without tools
+		// Chat mode: streaming API call without tools
 		if m.AppMode == models.ModeChat {
-			resp, err := m.Client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+			stream := m.Client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
 				Model:    m.CurrentModel.ID,
 				Messages: history,
 			})
-			if err != nil {
+			acc := openai.ChatCompletionAccumulator{}
+			for stream.Next() {
+				chunk := stream.Current()
+				acc.AddChunk(chunk)
+				if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+					if m.Program != nil {
+						m.Program.Send(StreamChunkMsg{Delta: chunk.Choices[0].Delta.Content})
+					}
+				}
+			}
+			if err := stream.Err(); err != nil {
+				if ctx.Err() != nil {
+					return CancelledMsg{}
+				}
 				return ErrMsg(err)
 			}
-
-			if len(resp.Choices) == 0 {
+			if len(acc.Choices) == 0 {
 				return ErrMsg(fmt.Errorf("empty response from model"))
 			}
-
-			// Remove system message from history before storing
+			fullContent := acc.Choices[0].Message.Content
 			storedHistory := history[1:]
-			storedHistory = append(storedHistory, resp.Choices[0].Message.ToParam())
-
+			storedHistory = append(storedHistory, acc.Choices[0].Message.ToParam())
 			return ResponseMsg{
-				Content:          resp.Choices[0].Message.Content,
-				PromptTokens:     resp.Usage.PromptTokens,
-				CompletionTokens: resp.Usage.CompletionTokens,
+				Content:          fullContent,
+				PromptTokens:     acc.Usage.PromptTokens,
+				CompletionTokens: acc.Usage.CompletionTokens,
 				History:          storedHistory,
 				ContextTokens:    EstimateHistoryTokens(storedHistory),
 			}
 		}
 
-		// Agent mode: agentic loop with tools
+		// Agent mode: agentic loop with tools, parallel execution, cancellation
 		var toolExecs []ToolExecRecord
 		iteration := 0
 		for {
 			iteration++
+
+			// Check for cancellation before each API call
+			if ctx.Err() != nil {
+				return CancelledMsg{}
+			}
 
 			// Compact history if approaching context limit
 			history = CompactHistory(history, m.GetMaxContextTokens())
@@ -712,6 +773,9 @@ func (m *Model) SendMessage(input string) tea.Cmd {
 				Tools:    tools.Definitions,
 			})
 			if err != nil {
+				if ctx.Err() != nil {
+					return CancelledMsg{}
+				}
 				return ErrMsg(err)
 			}
 
@@ -750,23 +814,51 @@ func (m *Model) SendMessage(input string) tea.Cmd {
 				}
 			}
 
-			// Handle tool calls - notify UI for each tool
+			// Handle tool calls — execute all in parallel, preserve result order
 			if len(choice.Message.ToolCalls) > 0 {
-				for _, tc := range choice.Message.ToolCalls {
-					if m.Program != nil {
-						m.Program.Send(ToolCallMsg{Name: tc.Function.Name, Arguments: tc.Function.Arguments})
-					}
+				type toolResult struct {
+					id      string
+					name    string
+					args    string
+					result  string
+					summary string
+				}
+				results := make([]toolResult, len(choice.Message.ToolCalls))
+				var wg sync.WaitGroup
 
-					result, err := tools.ExecuteTool(tc.Function.Name, tc.Function.Arguments)
-					if err != nil {
-						result = fmt.Sprintf("error: %v", err)
-					}
-					toolExecs = append(toolExecs, ToolExecRecord{Name: tc.Function.Name, Args: tc.Function.Arguments, Result: result})
-					history = append(history, openai.ToolMessage(tc.ID, result))
+				for i, tc := range choice.Message.ToolCalls {
+					wg.Add(1)
+					go func(i int, tc openai.ChatCompletionMessageToolCallUnion) {
+						defer wg.Done()
+						if m.Program != nil {
+							m.Program.Send(ToolCallMsg{Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+						}
+						res, err := tools.ExecuteTool(tc.Function.Name, tc.Function.Arguments)
+						if err != nil {
+							res = fmt.Sprintf("error: %v", err)
+						}
+						summary := tools.GenerateToolSummary(tc.Function.Name, tc.Function.Arguments, res)
+						results[i] = toolResult{
+							id:      tc.ID,
+							name:    tc.Function.Name,
+							args:    tc.Function.Arguments,
+							result:  res,
+							summary: summary,
+						}
+					}(i, tc)
+				}
+				wg.Wait()
 
+				// Check cancellation after tools complete
+				if ctx.Err() != nil {
+					return CancelledMsg{}
+				}
+
+				for _, r := range results {
+					toolExecs = append(toolExecs, ToolExecRecord{Name: r.name, Args: r.args, Result: r.result})
+					history = append(history, openai.ToolMessage(r.id, r.result))
 					if m.Program != nil {
-						summary := tools.GenerateToolSummary(tc.Function.Name, tc.Function.Arguments, result)
-						m.Program.Send(ToolResultMsg{Name: tc.Function.Name, Result: result, Summary: summary})
+						m.Program.Send(ToolResultMsg{Name: r.name, Result: r.result, Summary: r.summary})
 					}
 				}
 				continue

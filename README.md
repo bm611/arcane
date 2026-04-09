@@ -46,7 +46,7 @@ Run the application:
 ## Modes
 
 - **Chat Mode** (Default): Run `./arcane` for a standard AI chat interface.
-- **Agent Mode**: Run `./arcane --agent` to give the AI access to read/edit files and execute bash commands in your current directory.
+- **Agent Mode**: Press `Ctrl+A` inside the app to toggle Agent mode, which gives the AI access to read/edit files and execute bash commands in your current directory.
 
 ## Keyboard Shortcuts
 

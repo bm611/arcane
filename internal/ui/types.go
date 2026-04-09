@@ -2,6 +2,7 @@ package ui
 
 import (
 	"arcane/internal/models"
+	"context"
 	"database/sql"
 	"regexp"
 
@@ -27,7 +28,7 @@ const (
 	DefaultContextTokens = 80000 // Fallback if model context length is not available
 	RecentMessagesKeep   = 6     // Number of recent messages to keep intact
 	CharsPerToken        = 4     // Rough estimate for token calculation
-	TruncatedResultSize  = 500   // Max chars for truncated tool results (increased for better context)
+	TruncatedResultSize  = 2000  // Max chars for truncated tool results
 
 	// Agent loop limit
 	MaxToolIterations = 15 // Max tool call rounds before forcing a response
@@ -55,18 +56,21 @@ Guidelines:
 Working directory: %s`
 
 var AvailableModels = []models.AIModel{
-	{ID: "google/gemini-3-flash-preview", Name: "Gemini 3 Flash", Provider: "Gemini", Description: "Fast multimodal model"},
-	{ID: "google/gemini-3-pro-preview", Name: "Gemini 3 Pro", Provider: "Gemini", Description: "Advanced multimodal reasoning"},
-	{ID: "x-ai/grok-4.1-fast", Name: "Grok 4.1 Fast", Provider: "Xai", Description: "General purpose fast model"},
-	{ID: "x-ai/grok-code-fast-1", Name: "Grok Code Fast 1", Provider: "Xai", Description: "Code-focused fast model"},
-	{ID: "deepseek/deepseek-v3.2", Name: "DeepSeek V3.2", Provider: "Deepseek", Description: "Reasoning model"},
-	{ID: "minimax/minimax-m2.1", Name: "MiniMax M2.1", Provider: "MiniMax", Description: "Chat model"},
-	{ID: "perplexity/sonar-pro", Name: "Perplexity Sonar Pro", Provider: "Perplexity", Description: "Search-optimized model"},
-	{ID: "z-ai/glm-4.7", Name: "GLM 4.7", Provider: "Z.ai", Description: "Multilingual model"},
-	{ID: "openai/gpt-oss-120b:free", Name: "GPT-OSS 120B Free", Provider: "OpenAI", Description: "Open-source large language model"},
+	{ID: "google/gemini-3-flash-preview", Name: "Gemini 3 Flash", Provider: "Gemini", Description: "Fast multimodal model", ContextLength: 1048576},
+	{ID: "google/gemini-3-pro-preview", Name: "Gemini 3 Pro", Provider: "Gemini", Description: "Advanced multimodal reasoning", ContextLength: 1048576},
+	{ID: "x-ai/grok-4.1-fast", Name: "Grok 4.1 Fast", Provider: "Xai", Description: "General purpose fast model", ContextLength: 131072},
+	{ID: "x-ai/grok-code-fast-1", Name: "Grok Code Fast 1", Provider: "Xai", Description: "Code-focused fast model", ContextLength: 131072},
+	{ID: "deepseek/deepseek-v3.2", Name: "DeepSeek V3.2", Provider: "Deepseek", Description: "Reasoning model", ContextLength: 128000},
+	{ID: "minimax/minimax-m2.1", Name: "MiniMax M2.1", Provider: "MiniMax", Description: "Chat model", ContextLength: 1000000},
+	{ID: "perplexity/sonar-pro", Name: "Perplexity Sonar Pro", Provider: "Perplexity", Description: "Search-optimized model", ContextLength: 200000},
+	{ID: "z-ai/glm-4.7", Name: "GLM 4.7", Provider: "Z.ai", Description: "Multilingual model", ContextLength: 128000},
+	{ID: "openai/gpt-oss-120b:free", Name: "GPT-OSS 120B Free", Provider: "OpenAI", Description: "Open-source large language model", ContextLength: 128000},
 }
 
 type ErrMsg error
+
+type StreamChunkMsg struct{ Delta string }
+type CancelledMsg struct{}
 
 type ToolExecRecord struct {
 	Name   string
@@ -149,4 +153,8 @@ type Model struct {
 
 	// Mouse interaction
 	MouseHoverArt bool
+
+	// Streaming
+	StreamingContent string             // Accumulated streaming response being built
+	CancelFn         context.CancelFunc // Cancel function for the in-progress request
 }

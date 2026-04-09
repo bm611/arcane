@@ -391,31 +391,27 @@ func TruncateToolResult(toolName, result string) string {
 	return fmt.Sprintf("[%s: %d lines] %s...", toolName, lineCount, strings.TrimSpace(preview))
 }
 
-// CompactHistory reduces history size by truncating old tool results
+// CompactHistory reduces history size by truncating old tool results, then dropping old turns.
 func CompactHistory(history []openai.ChatCompletionMessageParamUnion, maxTokens int) []openai.ChatCompletionMessageParamUnion {
-	currentTokens := EstimateHistoryTokens(history)
-
-	// If under limit, no compaction needed
-	if currentTokens < maxTokens {
+	if EstimateHistoryTokens(history) < maxTokens {
 		return history
 	}
 
-	// Keep first message (initial task) and last N messages intact
+	// Need at least system message + RecentMessagesKeep to do anything useful
 	if len(history) <= RecentMessagesKeep+1 {
 		return history
 	}
 
 	compacted := make([]openai.ChatCompletionMessageParamUnion, 0, len(history))
 
-	// Always keep first message
+	// Always keep first (system) message
 	compacted = append(compacted, history[0])
 
-	// Process middle messages - truncate tool results
+	// Phase 1: truncate large tool results in the middle section
 	middleEnd := len(history) - RecentMessagesKeep
 	for i := 1; i < middleEnd; i++ {
 		msg := history[i]
 
-		// Check if this is a tool result message by marshaling and inspecting
 		data, err := json.Marshal(msg)
 		if err != nil {
 			compacted = append(compacted, msg)
@@ -428,10 +424,9 @@ func CompactHistory(history []openai.ChatCompletionMessageParamUnion, maxTokens 
 			continue
 		}
 
-		// Check for tool message (has tool_call_id)
+		// Truncate oversized tool result messages
 		if _, hasToolCallID := rawMsg["tool_call_id"]; hasToolCallID {
 			if content, ok := rawMsg["content"].(string); ok && len(content) > TruncatedResultSize {
-				// Create truncated tool message
 				truncated := TruncateToolResult("tool", content)
 				if toolCallID, ok := rawMsg["tool_call_id"].(string); ok {
 					compacted = append(compacted, openai.ToolMessage(toolCallID, truncated))
@@ -445,6 +440,13 @@ func CompactHistory(history []openai.ChatCompletionMessageParamUnion, maxTokens 
 
 	// Keep last N messages intact
 	compacted = append(compacted, history[middleEnd:]...)
+
+	// Phase 2: if still over limit, drop the oldest non-system message one at a time
+	// until we're under the limit or only the system + recent messages remain.
+	for EstimateHistoryTokens(compacted) >= maxTokens && len(compacted) > RecentMessagesKeep+1 {
+		// Drop index 1 (oldest message after system prompt)
+		compacted = append(compacted[:1], compacted[2:]...)
+	}
 
 	return compacted
 }
